@@ -8,15 +8,24 @@ import { connectDatabase, seedDatabase } from './config/db';
 
 dotenv.config();
 
-const allowedOrigins = process.env.FRONTEND_URL 
-  ? process.env.FRONTEND_URL.split(',').map((o: string) => o.trim()) 
-  : [
-      'http://localhost:3000', 
-      'http://127.0.0.1:3000', 
-      'http://localhost:5173', 
-      'http://localhost:5174', 
-      'https://codesprint.audisankara.ac.in'
-    ];
+const fallbackOrigins = [
+  'http://localhost:3000', 
+  'http://127.0.0.1:3000', 
+  'http://localhost:5173', 
+  'http://localhost:5174', 
+  'https://codesprint.audisankara.ac.in',
+  'https://national-hackthon-frontend.vercel.app',
+  'https://national-hackthon-admin.vercel.app'
+];
+
+const allowedOrigins = Array.from(new Set(
+  process.env.FRONTEND_URL 
+    ? [
+        ...process.env.FRONTEND_URL.split(',').map((o: string) => o.trim()),
+        ...fallbackOrigins
+      ]
+    : fallbackOrigins
+));
 
 const app = express();
 const server = http.createServer(app);
@@ -24,14 +33,10 @@ const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (process.env.FRONTEND_URL) {
-        if (allowedOrigins.indexOf(origin) !== -1) {
-          callback(null, true);
-        } else {
-          callback(new Error('Not allowed by CORS'));
-        }
-      } else {
+      if (allowedOrigins.includes(origin)) {
         callback(null, true);
+      } else {
+        callback(null, false);
       }
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -42,14 +47,10 @@ const io = new Server(server, {
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
-    if (process.env.FRONTEND_URL) {
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    } else {
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
+    } else {
+      callback(null, false);
     }
   },
   credentials: true
