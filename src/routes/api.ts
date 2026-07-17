@@ -122,8 +122,9 @@ router.post('/auth/admin-login', async (req: Request, res: Response) => {
     return res.status(400).json({ message: 'Password is required' });
   }
 
-  // Allow "CodeSprint-2026", "admin" or "admin123" for local run
-  if (password !== 'CodeSprint-2026' && password !== 'admin' && password !== 'admin123') {
+  // Read admin password from env (fallback: CodeSprint-2026)
+  const adminPassword = process.env.ADMIN_PASSWORD || 'CodeSprint-2026';
+  if (password !== adminPassword) {
     return res.status(401).json({ message: 'Invalid admin password' });
   }
 
