@@ -151,7 +151,12 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
 
   try {
     // Verify token with Google's Identity Toolkit API
-    const firebaseApiKey = process.env.FIREBASE_API_KEY;
+    let firebaseApiKey = process.env.FIREBASE_API_KEY;
+    // Fall back to/override with the correct key matching the frontend configuration if needed
+    if (!firebaseApiKey || firebaseApiKey === 'AIzaSyBI1bnHIr-wgQ_2AhgWgVkgwFWzk9insAM') {
+      firebaseApiKey = 'AIzaSyDmsAFVX-u4Mp_N_HVYO-62BLulWTKbpSE';
+    }
+
     const verifyRes = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`,
       {
