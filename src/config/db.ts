@@ -20,6 +20,8 @@ export interface User {
   amountPaid: number;
   teamId?: string;
   teamRole?: 'leader' | 'member';
+  foodPreference?: 'Veg' | 'Non-Veg';
+  tshirtSize?: 'S' | 'M' | 'L' | 'XL' | 'XXL';
   checkedIn: boolean;
   checkInTime?: string;
   createdAt: string;
@@ -90,6 +92,65 @@ export interface TeamInvite {
   createdAt: string;
 }
 
+export interface Guest {
+  id: string;
+  name: string;
+  designation: string;
+  topic: string;
+  email: string;
+  phone: string;
+  status: 'invited' | 'confirmed' | 'declined';
+  vip: boolean;
+  imageUrl?: string;
+  createdAt: string;
+}
+
+export interface HighlightAlbum {
+  id: string;
+  title: string;
+  description: string;
+  coverImageUrl?: string;
+  images: string[];
+  isPinned: boolean;
+  createdAt: string;
+}
+
+export interface TimelineEvent {
+  id: string;
+  title: string;
+  date: string;
+  time: string;
+  description: string;
+  category: string;
+}
+
+export interface Coordinator {
+  id: string;
+  name: string;
+  role: string;
+  dept: string;
+  email: string;
+  phone: string;
+  avatar: string;
+  color: string;
+}
+
+export interface College {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface ProblemStatement {
+  id: string;
+  title: string;
+  description: string;
+  visibleFrom: string; // ISO Date String
+  visibleTo: string;   // ISO Date String
+  assignedTo: string[]; // Array of Team IDs (or 'ALL' if it applies to everyone, we can just use a specific string "ALL" or just put all team IDs)
+  createdAt: string;
+}
+
 // ─── Shared Schema Options ────────────────────────────────────────────────────
 
 const baseOpts = { strict: false };
@@ -108,6 +169,12 @@ const CouponModel     = makeModel('Coupon');
 const NotifModel      = makeModel('Notification');
 const PaymentModel    = makeModel('Payment');
 const InviteModel     = makeModel('Invite');
+const GuestModel      = makeModel('Guest');
+const HighlightModel  = makeModel('Highlight');
+const TimelineModel   = makeModel('Timeline');
+const CoordinatorModel = makeModel('Coordinator');
+const CollegeModel    = makeModel('College');
+const ProblemModel    = makeModel('Problem');
 
 // ─── Generic Collection Wrapper ───────────────────────────────────────────────
 
@@ -178,6 +245,12 @@ export const Coupons       = new MongoCollection<Coupon>(CouponModel);
 export const Notifications = new MongoCollection<Notification>(NotifModel);
 export const Payments      = new MongoCollection<PaymentLog>(PaymentModel);
 export const Invites       = new MongoCollection<TeamInvite>(InviteModel);
+export const GuestsDb      = new MongoCollection<Guest>(GuestModel);
+export const HighlightsDb  = new MongoCollection<HighlightAlbum>(HighlightModel);
+export const TimelineDb    = new MongoCollection<TimelineEvent>(TimelineModel);
+export const CoordinatorsDb = new MongoCollection<Coordinator>(CoordinatorModel);
+export const CollegesDb     = new MongoCollection<College>(CollegeModel);
+export const ProblemDb      = new MongoCollection<ProblemStatement>(ProblemModel);
 
 // ─── MongoDB Connection ───────────────────────────────────────────────────────
 
@@ -216,6 +289,22 @@ export async function seedDatabase() {
     }
   }
   console.log('[DB] Coupons seeding check completed.');
+
+  const coordinatorsToSeed = [
+    { id: 'c1', name: 'Dr. N. Penchalaiah', role: 'Faculty Coordinator', dept: 'Dept. of Computer Science & Engineering', email: 'penchalaiah@audisankara.ac.in', phone: '9876500001', avatar: 'NP', color: '#a855f7' },
+    { id: 'c2', name: 'Dr. K. Dhanumjaya', role: 'Dean, School of Engineering & Technology', dept: 'School of Engineering & Technology', email: 'dhanumjaya@audisankara.ac.in', phone: '9876500002', avatar: 'KD', color: '#3b82f6' },
+    { id: 'c3', name: 'Mr. Arjun Reddy', role: 'Student Coordinator — Lead', dept: 'CSE Final Year', email: 'arjun@codesprint.com', phone: '9000000010', avatar: 'AR', color: '#22c55e' },
+    { id: 'c4', name: 'Ms. Sravani Devi', role: 'Student Coordinator — Tech', dept: 'IT Third Year', email: 'sravani@codesprint.com', phone: '9000000011', avatar: 'SD', color: '#f97316' },
+    { id: 'c5', name: 'Mr. Karthik Varma', role: 'Student Coordinator — Logistics', dept: 'ECE Final Year', email: 'karthik@codesprint.com', phone: '9000000012', avatar: 'KV', color: '#f59e0b' },
+    { id: 'c6', name: 'Ms. Pooja Lakshmi', role: 'Student Coordinator — Design', dept: 'CSE Third Year', email: 'pooja@codesprint.com', phone: '9000000013', avatar: 'PL', color: '#ec4899' },
+  ];
+
+  for (const c of coordinatorsToSeed) {
+    const exists = await CoordinatorsDb.findOne({ id: c.id });
+    if (!exists) {
+      await CoordinatorsDb.create(c);
+    }
+  }
 
   // Seeding of mock teams and users has been removed to keep the database clean from fake data.
 }
