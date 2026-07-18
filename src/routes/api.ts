@@ -102,7 +102,7 @@ router.post('/auth/otp-send', async (req: Request, res: Response) => {
 
 // 2. Verify OTP (Handles both Login & Signup)
 router.post('/auth/otp-verify', async (req: Request, res: Response) => {
-  const { email, code, name, phone, college, branch, year, gender, linkedin, portfolio, foodPreference, tshirtSize } = req.body;
+  const { email, code, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, foodPreference, tshirtSize } = req.body;
 
   if (!email || !code) {
     return res.status(400).json({ message: 'Email and OTP code are required' });
@@ -138,11 +138,13 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
       email,
       phone,
       college,
+      rollNumber,
       branch,
       year,
       gender,
       linkedin,
       portfolio,
+      teamPreference,
       foodPreference: foodPreference || 'Veg',
       tshirtSize: tshirtSize || 'M',
       role: 'participant',
@@ -584,7 +586,7 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
 
 // 1. Create a Team
 router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Response) => {
-  const { name, description, logoUrl } = req.body;
+  const { name, description, logoUrl, customTeamId } = req.body;
   const userId = req.user?.id;
 
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
@@ -600,7 +602,7 @@ router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Re
     return res.status(400).json({ message: 'You are already in a team' });
   }
 
-  const teamId = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + `-${Math.random().toString(36).substring(2, 6)}`;
+  const teamId = customTeamId || (name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + `-${Math.random().toString(36).substring(2, 6)}`);
   
   const team = await Teams.create({
     id: teamId,
@@ -946,6 +948,67 @@ router.get('/admin/participants', authenticateToken, requireAdmin, async (req: R
   }
 
   return res.json(enriched);
+});
+
+// 2b. Delete a participant
+router.delete('/admin/participants/:id', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = await Users.findOne({ id });
+  if (!user) return res.status(404).json({ message: 'User not found' });
+
+  // Clean up team reference if user is in a team
+  if (user.teamId) {
+    const team = await Teams.findOne({ id: user.teamId });
+    if (team) {
+      if (team.leaderId === user.id) {
+        // User is the leader: dissolve the team
+        await Promise.all(team.members.map(mId => {
+          if (mId !== user.id) {
+            return Users.updateOne(mId, { teamId: undefined, teamRole: undefined, role: 'participant' });
+          }
+          return Promise.resolve();
+        }));
+        await Teams.deleteOne(team.id);
+      } else {
+        // User is a member: pull them from the team members list
+        const updatedMembers = team.members.filter(mId => mId !== user.id);
+        const newSlots = team.remainingSlots + 1;
+        const teamStatus = newSlots > 0 ? 'open' as const : 'full' as const;
+        
+        await Teams.updateOne(team.id, {
+          members: updatedMembers,
+          remainingSlots: newSlots,
+          status: teamStatus
+        });
+      }
+    }
+  }
+
+  // Delete the user
+  const deleted = await Users.deleteOne(id);
+  if (!deleted) {
+    return res.status(500).json({ message: 'Failed to delete user' });
+  }
+
+  return res.json({ success: true, message: 'User deleted successfully' });
+});
+
+// 2c. Impersonate / Login as user
+router.post('/admin/impersonate', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ message: 'User ID is required' });
+
+  const user = await Users.findOne({ id: userId });
+  if (!user) return res.status(404).json({ message: 'User not found' });
+
+  // Generate JWT token for this user
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role },
+    process.env.JWT_SECRET || 'codesprint-secret-key-2026',
+    { expiresIn: '7d' }
+  );
+
+  return res.json({ success: true, token });
 });
 
 // 3. Mark manual check-in or Scan QR code verify
