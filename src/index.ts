@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -8,123 +8,112 @@ import { connectDatabase, seedDatabase } from './config/db';
 
 dotenv.config();
 
-const fallbackOrigins = [
-  'http://localhost:3000', 
-  'http://127.0.0.1:3000', 
-  'http://localhost:5173', 
-  'http://localhost:5174', 
-  'https://codesprint.audisankara.ac.in',
-  'https://national-hackthon-frontend.vercel.app',
-  'https://national-hackthon-admin.vercel.app'
-];
-
-const allowedOrigins = Array.from(new Set(
-  process.env.FRONTEND_URL 
-    ? [
-        ...process.env.FRONTEND_URL.split(',').map((o: string) => o.trim()),
-        ...fallbackOrigins
-      ]
-    : fallbackOrigins
-));
-
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: true, // Automatically reflect the request origin
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true
-  }
-});
-app.set('io', io);
 
+// ─── CORS ──────────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: true, // Automatically reflect the request origin
+  origin: true,
   credentials: true
 }));
-app.options('*', cors()); // Explicitly handle OPTIONS preflight
-app.use(express.json());
+app.options('*', cors()); // Handle all OPTIONS preflight requests
 
-// API Routes
-app.use('/api', apiRouter);
+app.use(express.json({ limit: '10mb' }));
 
-// Basic health check
-app.get('/', (req, res) => {
-  res.json({ message: 'CodeSprint-2026 API server running...' });
+// ─── LAZY DB CONNECTION ────────────────────────────────────────────────────
+// Vercel serverless functions are stateless: connect on first request
+let dbConnected = false;
+app.use(async (req, res, next) => {
+  if (!dbConnected) {
+    try {
+      await connectDatabase();
+      await seedDatabase();
+      dbConnected = true;
+    } catch (err) {
+      console.error('[DB] Connection failed:', err);
+      return res.status(500).json({ message: 'Database connection error' });
+    }
+  }
+  next();
 });
 
-// Socket.IO real-time communication
-io.on('connection', (socket) => {
-  console.log(`[Socket] User connected: ${socket.id}`);
+// ─── API ROUTES ────────────────────────────────────────────────────────────
+app.use('/api', apiRouter);
 
-  // User joins their personal room for notifications
-  socket.on('join_user_room', (userId: string) => {
-    socket.join(userId);
-    console.log(`[Socket] User ${userId} joined personal room`);
-  });
+// Health check
+app.get('/', (req: Request, res: Response) => {
+  res.json({ message: 'CodeSprint-2026 API running', status: 'OK' });
+});
 
-  // User joins a team room for team-updates
-  socket.on('join_team_room', (teamId: string) => {
-    socket.join(teamId);
-    console.log(`[Socket] User joined team room: ${teamId}`);
-  });
+// ─── SOCKET.IO (local dev only) ────────────────────────────────────────────
+// Socket.IO doesn't work on Vercel serverless. It only runs locally.
+const PORT = process.env.PORT || 5000;
 
-  // Notify team leader of a new join request
-  socket.on('new_join_request', (data: { leaderId: string; teamId: string; requesterName: string }) => {
-    socket.to(data.leaderId).emit('join_request_received', {
-      teamId: data.teamId,
-      message: `${data.requesterName} has requested to join your team.`
-    });
-  });
-
-  // Notify user of request approval or rejection
-  socket.on('request_response', (data: { userId: string; teamId: string; status: 'approved' | 'rejected' }) => {
-    socket.to(data.userId).emit('request_response_received', {
-      teamId: data.teamId,
-      status: data.status,
-      message: data.status === 'approved' 
-        ? 'Your request to join the team has been approved!' 
-        : 'Your request to join the team was declined.'
-    });
-    
-    // If approved, notify the entire team room to update their member list
-    if (data.status === 'approved') {
-      io.to(data.teamId).emit('team_updated');
+if (process.env.NODE_ENV !== 'production') {
+  const server = http.createServer(app);
+  const io = new Server(server, {
+    cors: {
+      origin: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      credentials: true
     }
   });
 
-  // Broadcast team changes (members leaving, role edits)
-  socket.on('team_modified', (teamId: string) => {
-    io.to(teamId).emit('team_updated');
-  });
+  app.set('io', io);
 
-  // Admin broad notification trigger
-  socket.on('admin_broadcast', (data: { targetType: string; targetId?: string; title: string; message: string }) => {
-    io.emit('broadcast_received', data);
-  });
+  io.on('connection', (socket) => {
+    console.log(`[Socket] User connected: ${socket.id}`);
 
-  socket.on('disconnect', () => {
-    console.log(`[Socket] User disconnected: ${socket.id}`);
-  });
-});
-
-const PORT = process.env.PORT || 5000;
-
-async function startServer() {
-  try {
-    // Connect to MongoDB Atlas
-    await connectDatabase();
-
-    // Seed default data
-    await seedDatabase();
-    
-    server.listen(PORT, () => {
-      console.log(`[Server] Express server listening on http://localhost:${PORT}`);
+    socket.on('join_user_room', (userId: string) => {
+      socket.join(userId);
     });
-  } catch (error) {
-    console.error('[Server] Initialization failed:', error);
-    process.exit(1);
-  }
+
+    socket.on('join_team_room', (teamId: string) => {
+      socket.join(teamId);
+    });
+
+    socket.on('new_join_request', (data: { leaderId: string; teamId: string; requesterName: string }) => {
+      socket.to(data.leaderId).emit('join_request_received', {
+        teamId: data.teamId,
+        message: `${data.requesterName} has requested to join your team.`
+      });
+    });
+
+    socket.on('request_response', (data: { userId: string; teamId: string; status: 'approved' | 'rejected' }) => {
+      socket.to(data.userId).emit('request_response_received', {
+        teamId: data.teamId,
+        status: data.status,
+        message: data.status === 'approved'
+          ? 'Your request to join the team has been approved!'
+          : 'Your request to join the team was declined.'
+      });
+      if (data.status === 'approved') {
+        io.to(data.teamId).emit('team_updated');
+      }
+    });
+
+    socket.on('team_modified', (teamId: string) => {
+      io.to(teamId).emit('team_updated');
+    });
+
+    socket.on('admin_broadcast', (data: { targetType: string; targetId?: string; title: string; message: string }) => {
+      io.emit('broadcast_received', data);
+    });
+
+    socket.on('disconnect', () => {
+      console.log(`[Socket] User disconnected: ${socket.id}`);
+    });
+  });
+
+  server.listen(PORT, () => {
+    console.log(`[Server] Listening on http://localhost:${PORT}`);
+  });
+} else {
+  // On Vercel (production), store a mock io so routes don't crash when calling req.app.get('io')
+  const mockIo = {
+    to: () => ({ emit: () => {} }),
+    emit: () => {}
+  };
+  app.set('io', mockIo);
 }
 
-startServer();
+export default app;
