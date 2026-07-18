@@ -31,9 +31,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      callback(null, true); // Allow all origins to bypass CORS issues on Vercel
-    },
+    origin: true, // Automatically reflect the request origin
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true
   }
@@ -41,11 +39,10 @@ const io = new Server(server, {
 app.set('io', io);
 
 app.use(cors({
-  origin: (origin, callback) => {
-    callback(null, true); // Allow all origins to bypass CORS issues on Vercel
-  },
+  origin: true, // Automatically reflect the request origin
   credentials: true
 }));
+app.options('*', cors()); // Explicitly handle OPTIONS preflight
 app.use(express.json());
 
 // API Routes
