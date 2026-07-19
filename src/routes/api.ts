@@ -66,6 +66,183 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
   next();
 };
 
+const generateTeamId = async (): Promise<string> => {
+  const allTeams = await Teams.find({});
+  let nextNum = allTeams.length + 1;
+  let teamId = `cs2026-${String(nextNum).padStart(3, '0')}`;
+  
+  let duplicate = await Teams.findOne({ id: teamId });
+  while (duplicate) {
+    nextNum += 1;
+    teamId = `cs2026-${String(nextNum).padStart(3, '0')}`;
+    duplicate = await Teams.findOne({ id: teamId });
+  }
+  return teamId;
+};
+
+const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, totalAmountPaid: number) => {
+  try {
+    const team = await Teams.findOne({ id: teamId });
+    if (!team) return;
+
+    // Update Team Payment status
+    await Teams.updateOne(team.id, { paymentStatus: 'paid' });
+
+    // Update all team members in database
+    const members = await Users.find(u => u.teamId === teamId);
+    
+    for (const member of members) {
+      if (member.id === team.leaderId) {
+        // Leader
+        await Users.updateOne(member.id, {
+          paymentStatus: 'paid',
+          paymentId: paymentId,
+          amountPaid: totalAmountPaid
+        });
+      } else {
+        // Members
+        await Users.updateOne(member.id, {
+          paymentStatus: 'paid',
+          paymentId: paymentId,
+          amountPaid: 0
+        });
+
+        // Create in-app notification
+        await Notifications.create({
+          recipientType: 'individual',
+          recipientTarget: member.id,
+          title: 'Team Registration Confirmed',
+          message: `Your team "${team.name}" registration fee has been fully paid by your leader! You are now registered.`,
+          type: 'success',
+          readBy: [],
+          createdAt: new Date().toISOString()
+        });
+
+        // Send confirmation email
+        try {
+          await transporter.sendMail({
+            from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+            to: member.email,
+            subject: `Team Registration Confirmed - ${team.name} - CodeSprint 2026`,
+            html: `
+              <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+                <div style="text-align: center; margin-bottom: 30px;">
+                  <h1 style="color: #6d28d9; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">CodeSprint 2026</h1>
+                  <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Audisankara University</p>
+                </div>
+                
+                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                  Dear <strong>${member.name}</strong>,
+                </p>
+                
+                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                  Great news! Your team leader has completed the payment for your team <strong>${team.name}</strong>.
+                </p>
+                
+                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+                  Your slot is fully confirmed, and your registration fee is covered.
+                </p>
+                
+                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px;">
+                  Please join the official event WhatsApp group to receive further instructions and updates:
+                </p>
+      
+                <div style="background-color: #f8fafc; border-left: 4px solid #22c55e; padding: 20px; border-radius: 4px; margin-bottom: 30px;">
+                  <p style="color: #0f172a; font-weight: 600; margin-top: 0; margin-bottom: 15px; font-size: 15px;">Please join in this group 👇</p>
+                  <a href="https://chat.whatsapp.com/IA1BaLQ7gpu46RrbEz7mN7" style="display: inline-block; background-color: #22c55e; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 2px 4px rgba(34, 197, 94, 0.3);">
+                    Join WhatsApp Group
+                  </a>
+                </div>
+                
+                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+                  You can now log in to your dashboard to view your team details and event schedule.
+                </p>
+                
+                <div style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
+                  <p style="color: #475569; font-size: 15px; line-height: 1.5; margin: 0;">
+                    Warm regards,<br>
+                    <strong>CodeSprint 2026</strong><br>
+                    Audisankara University
+                  </p>
+                </div>
+              </div>
+            `
+          });
+        } catch (emailErr) {
+          console.error(`Failed to send email to team member ${member.email}:`, emailErr);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error handling team payment success cascade:', err);
+  }
+};
+
+const processUserTeamPreference = async (userId: string) => {
+  try {
+    const user = await Users.findOne({ id: userId });
+    if (!user || user.teamId) return;
+
+    if (user.teamPreference === 'Create a Team' && user.tempTeamName) {
+      const teamId = await generateTeamId();
+      const team = await Teams.create({
+        id: teamId,
+        name: user.tempTeamName,
+        description: `${user.name}'s team created during registration.`,
+        college: user.college,
+        leaderId: user.id,
+        members: [user.id],
+        remainingSlots: 4, // Max 5 members
+        paidSlots: user.tempSlots || 1, // Store total paid slots
+        status: 'open',
+        inviteLink: `http://localhost:3000/teams/join?teamId=${teamId}`,
+        joinRequests: [],
+        createdAt: new Date().toISOString()
+      });
+
+      await Users.updateOne(user.id, {
+        role: 'team-leader',
+        teamId: team.id,
+        teamRole: 'leader'
+      });
+      console.log(`[Team Auto-Create] Created team "${user.tempTeamName}" for user ${user.email}`);
+    } else if (user.teamPreference === 'Join a Team' && user.tempTeamCode) {
+      const targetTeam = await Teams.findOne({ id: user.tempTeamCode });
+      if (targetTeam) {
+        const alreadyRequested = targetTeam.joinRequests?.some(r => r.userId === user.id) || false;
+        const alreadyMember = targetTeam.members?.includes(user.id) || false;
+        
+        if (!alreadyRequested && !alreadyMember && targetTeam.remainingSlots > 0) {
+          const updatedRequests = [...(targetTeam.joinRequests || []), {
+            userId: user.id,
+            name: user.name,
+            email: user.email,
+            college: user.college,
+            status: 'pending' as const
+          }];
+
+          await Teams.updateOne(targetTeam.id, { joinRequests: updatedRequests });
+
+          // Send notification to Team Leader
+          await Notifications.create({
+            recipientType: 'individual',
+            recipientTarget: targetTeam.leaderId,
+            title: 'New Join Request',
+            message: `${user.name} wants to join your team "${targetTeam.name}".`,
+            type: 'info',
+            readBy: [],
+            createdAt: new Date().toISOString()
+          });
+          
+          console.log(`[Team Auto-Request] Created join request for user ${user.email} to team "${targetTeam.name}"`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error processing auto team preference:', err);
+  }
+};
+
 // --- AUTHENTICATION ENDPOINTS ---
 
 // 1. Send OTP (Simulated)
@@ -102,7 +279,7 @@ router.post('/auth/otp-send', async (req: Request, res: Response) => {
 
 // 2. Verify OTP (Handles both Login & Signup)
 router.post('/auth/otp-verify', async (req: Request, res: Response) => {
-  const { email, code, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, foodPreference, tshirtSize } = req.body;
+  const { email, code, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, slots, foodPreference, tshirtSize } = req.body;
 
   if (!email || !code) {
     return res.status(400).json({ message: 'Email and OTP code are required' });
@@ -120,9 +297,38 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
     otps.delete(email.toLowerCase());
   }
 
-  let user = await Users.findOne({ email });
+  let user = await Users.findOne({ email: email.toLowerCase() });
 
-  if (!user) {
+  if (user && user.profileCompleted === false) {
+    // Existing pre-paid member completing profile details!
+    if (phone) {
+      const existingPhone = await Users.findOne({ phone });
+      if (existingPhone && existingPhone.id !== user.id) {
+        return res.status(400).json({ message: 'Phone number is already registered.' });
+      }
+    }
+    if (rollNumber) {
+      const existingRoll = await Users.findOne({ rollNumber });
+      if (existingRoll && existingRoll.id !== user.id) {
+        return res.status(400).json({ message: 'Roll number / ID number is already registered.' });
+      }
+    }
+
+    await Users.updateOne(user.id, {
+      name: name || user.name,
+      phone,
+      college,
+      rollNumber,
+      branch,
+      year,
+      gender,
+      linkedin,
+      portfolio,
+      tshirtSize: tshirtSize || 'M',
+      profileCompleted: true
+    });
+    user = await Users.findOne({ id: user.id });
+  } else if (!user) {
     // If sign up details are missing, tell the frontend to collect them
     if (!name || !phone || !college || !branch || !year || !gender) {
       return res.status(202).json({ 
@@ -131,11 +337,24 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
       });
     }
 
+    // Check unique phone
+    const existingPhone = await Users.findOne({ phone });
+    if (existingPhone) {
+      return res.status(400).json({ message: 'Phone number is already registered.' });
+    }
+
+    // Check unique rollNumber / ID
+    if (rollNumber) {
+      const existingRoll = await Users.findOne({ rollNumber });
+      if (existingRoll) {
+        return res.status(400).json({ message: 'Roll/ID number is already registered.' });
+      }
+    }
 
     // Create User (Participant by default)
     user = await Users.create({
       name,
-      email,
+      email: email.toLowerCase(),
       phone,
       college,
       rollNumber,
@@ -145,14 +364,22 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
       linkedin,
       portfolio,
       teamPreference,
+      tempTeamName: teamPreference === 'Create a Team' ? teamName : undefined,
+      tempTeamCode: teamPreference === 'Join a Team' ? teamCode : undefined,
+      tempSlots: teamPreference === 'Create a Team' ? (Number(slots) || 1) : 1,
       foodPreference: foodPreference || 'Veg',
       tshirtSize: tshirtSize || 'M',
       role: 'participant',
       paymentStatus: 'pending',
       amountPaid: 0,
       checkedIn: false,
+      profileCompleted: true, // normal signup is completed immediately
       createdAt: new Date().toISOString()
     });
+  }
+
+  if (!user) {
+    return res.status(500).json({ message: 'Failed to create or retrieve user.' });
   }
 
   const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -276,15 +503,24 @@ router.get('/auth/me', authenticateToken, async (req: AuthRequest, res: Response
 router.get('/public/teams', async (req: Request, res: Response) => {
   const { search, college, slotsAvailable, sort } = req.query;
 
-  let allTeams = await Teams.find();
+  // Only retrieve teams that are explicitly set to OPEN (Public)
+  let allTeams = await Teams.find(t => t.teamStatus === 'OPEN');
   
-  // Attach leader names to the response for display
+  // Attach leader names and member details to the response for display
   const teamsWithLeaderDetails = await Promise.all(allTeams.map(async (t) => {
     const leader = await Users.findOne({ id: t.leaderId });
+    
+    // Fetch details of all members
+    const memberDetails = await Promise.all(t.members.map(async (mId) => {
+      const u = await Users.findOne({ id: mId });
+      return u ? { name: u.name, gender: u.gender } : null;
+    }));
+
     return {
       ...t,
       leaderName: leader ? leader.name : 'Unknown Leader',
-      memberCount: t.members.length
+      memberCount: t.members.length,
+      membersList: memberDetails.filter(Boolean) as { name: string; gender: string; }[]
     };
   }));
 
@@ -308,7 +544,7 @@ router.get('/public/teams', async (req: Request, res: Response) => {
 
   // Slots available filter
   if (slotsAvailable === 'true') {
-    filtered = filtered.filter(t => t.remainingSlots > 0 && t.status === 'open');
+    filtered = filtered.filter(t => t.teamStatus === 'OPEN' && t.availableSlots !== undefined && t.availableSlots > 0);
   }
 
   // Sort
@@ -334,7 +570,7 @@ router.get('/public/colleges', async (req: Request, res: Response) => {
 
 // 1. Validate Coupon Code
 router.post('/coupons/validate', async (req: Request, res: Response) => {
-  const { code, college } = req.body;
+  const { code, college, slots } = req.body;
   
   if (!code) {
     return res.status(400).json({ message: 'Coupon code is required' });
@@ -364,7 +600,7 @@ router.post('/coupons/validate', async (req: Request, res: Response) => {
     }
   }
 
-  const basePrice = 399;
+  const basePrice = 399 * (Number(slots) || 1);
   let discountAmount = 0;
 
   if (coupon.discountType === 'percentage') {
@@ -390,10 +626,35 @@ router.post('/coupons/validate', async (req: Request, res: Response) => {
 
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', authenticateToken, async (req: AuthRequest, res: Response) => {
-  const { amount } = req.body;
-  if (!amount) return res.status(400).json({ message: 'Amount is required' });
-
+  let expectedAmount = 399;
   try {
+    const user = await Users.findOne({ id: req.user!.id });
+    if (user) {
+      if (user.role === 'team-leader' && user.teamId) {
+        const team = await Teams.findOne({ id: user.teamId });
+        if (team) {
+          expectedAmount = team.members.length * 399;
+        }
+      } else {
+        expectedAmount = 399;
+      }
+    }
+
+    // Handle coupon validation if couponCode is provided in the body
+    const { couponCode } = req.body;
+    if (couponCode) {
+      const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+      if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+        let discountAmount = 0;
+        if (coupon.discountType === 'percentage') {
+          discountAmount = (expectedAmount * coupon.discountValue) / 100;
+        } else {
+          discountAmount = coupon.discountValue;
+        }
+        expectedAmount = Math.max(0, expectedAmount - discountAmount);
+      }
+    }
+
     const keyId = process.env.key_id;
     const keySecret = process.env.key_secret;
 
@@ -402,7 +663,7 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       return res.json({
         id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
         currency: 'INR',
-        amount: amount * 100,
+        amount: expectedAmount * 100,
       });
     }
 
@@ -413,7 +674,7 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
         'Authorization': 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64')
       },
       body: JSON.stringify({
-        amount: Math.round(amount * 100), // Razorpay works in paise
+        amount: Math.round(expectedAmount * 100), // Razorpay works in paise
         currency: 'INR',
         receipt: `receipt_${uuidv4().substring(0, 14)}`
       })
@@ -427,7 +688,7 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       return res.json({
         id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
         currency: 'INR',
-        amount: amount * 100,
+        amount: expectedAmount * 100,
       });
     }
 
@@ -442,7 +703,7 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
     return res.json({
       id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
       currency: 'INR',
-      amount: amount * 100,
+      amount: expectedAmount * 100,
     });
   }
 });
@@ -499,13 +760,22 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
     }
   }
 
-  // Update user profile
-  await Users.updateOne(user.id, {
-    paymentStatus: 'paid',
-    paymentId: paymentLog.razorpayPaymentId,
-    couponUsed: couponCode || undefined,
-    amountPaid: amount || 399
-  });
+  // Update user profile or cascade for team
+  if (user.role === 'team-leader' && user.teamId) {
+    await handleTeamPaymentSuccess(user.teamId, paymentLog.razorpayPaymentId, amount || 399);
+  } else {
+    await Users.updateOne(user.id, {
+      paymentStatus: 'paid',
+      paymentId: paymentLog.razorpayPaymentId,
+      couponUsed: couponCode || undefined,
+      amountPaid: amount || 399
+    });
+  }
+
+  // Process auto-team preference (individual only, team leaders are already in a team)
+  if (user.role !== 'team-leader') {
+    await processUserTeamPreference(user.id);
+  }
 
   // Create real-time notification
   await Notifications.create({
@@ -581,6 +851,332 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   return res.json({ success: true, message: 'Payment completed successfully', user: updatedUser });
 });
 
+// 3. Submit UTR for Manual Payment Verification
+router.post('/payments/submit-utr', authenticateToken, async (req: AuthRequest, res: Response) => {
+  const { utr } = req.body;
+  const userId = req.user?.id;
+
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!utr || typeof utr !== 'string' || !utr.trim()) {
+    return res.status(400).json({ message: 'UTR number is required' });
+  }
+
+  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
+  if (sanitizedUtr.length < 12) {
+    return res.status(400).json({ message: 'UTR number must be at least 12 characters long' });
+  }
+
+  const user = await Users.findOne({ id: userId });
+  if (!user) return res.status(404).json({ message: 'User not found' });
+
+  // Check if this UTR is already in use by any other user
+  const duplicate = await Users.findOne(u => u.utr === sanitizedUtr && u.id !== userId);
+
+  if (duplicate) {
+    // Auto-reject the user due to duplicate UTR
+    await Users.updateOne(user.id, {
+      paymentStatus: 'rejected',
+      utr: sanitizedUtr
+    });
+    
+    // Create notification
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: user.id,
+      title: 'Payment Verification Rejected',
+      message: `Your payment request was automatically rejected due to duplicate UTR number.`,
+      type: 'warning',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+
+    const updatedUser = await Users.findOne({ id: user.id });
+    return res.status(400).json({ 
+      success: false, 
+      autoRejected: true, 
+      message: 'This UTR has already been submitted by another user. Your registration request is auto-rejected. Please submit a valid unique transaction UTR.', 
+      user: updatedUser 
+    });
+  }
+
+  // Unique UTR - set status to submitted
+  await Users.updateOne(user.id, {
+    paymentStatus: 'submitted',
+    utr: sanitizedUtr
+  });
+
+  // Send pending verification email
+  try {
+    await transporter.sendMail({
+      from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+      to: user.email,
+      subject: 'Payment Verification Pending - CodeSprint 2026',
+      html: `
+        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #6d28d9; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">CodeSprint 2026</h1>
+            <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Audisankara University</p>
+          </div>
+          
+          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+            Dear <strong>${user.name}</strong>,
+          </p>
+          
+          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+            Thank you for registering for CodeSprint 2026 and submitting your transaction UTR.
+          </p>
+          
+          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+            We have successfully received your information and transaction UTR number: <strong>${sanitizedUtr}</strong>.
+          </p>
+          
+          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px; background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 15px; border-radius: 6px;">
+            <strong>Please Note:</strong> Our management team is currently checking your payment transaction. The verification and account activation process usually takes about <strong>8 hours</strong>.
+          </p>
+          
+          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+            Once your payment has been approved, your account will be activated, and you will receive another confirmation email with instructions to log in and join the official event WhatsApp group.
+          </p>
+          
+          <div style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
+            <p style="color: #475569; font-size: 15px; line-height: 1.5; margin: 0;">
+              Warm regards,<br>
+              <strong>CodeSprint 2026 Team</strong><br>
+              Audisankara University
+            </p>
+          </div>
+        </div>
+      `
+    });
+    console.log(`[Email] Sent verification pending email to ${user.email}`);
+  } catch (err) {
+    console.error('Failed to send verification pending email:', err);
+  }
+
+  // Create notification
+  await Notifications.create({
+    recipientType: 'individual',
+    recipientTarget: user.id,
+    title: 'UTR Submitted for Verification',
+    message: `Thank you, ${user.name}! Your UTR ${sanitizedUtr} has been submitted. Management will verify and activate your account.`,
+    type: 'info',
+    readBy: [],
+    createdAt: new Date().toISOString()
+  });
+
+  const updatedUser = await Users.findOne({ id: user.id });
+  return res.json({ 
+    success: true, 
+    message: 'UTR submitted successfully. Awaiting admin verification.', 
+    user: updatedUser 
+  });
+});
+
+
+// Validation endpoint for unique team name / team code
+router.get('/teams/validate-unique', async (req: Request, res: Response) => {
+  const { name, code } = req.query;
+  let nameTaken = false;
+  let codeTaken = false;
+
+  try {
+    if (name) {
+      const existingName = await Teams.findOne(t => t.name.toLowerCase() === String(name).trim().toLowerCase());
+      if (existingName) nameTaken = true;
+    }
+
+    if (code) {
+      const existingCode = await Teams.findOne(t => t.id.toLowerCase() === String(code).trim().toLowerCase());
+      if (existingCode) codeTaken = true;
+    }
+
+    return res.json({ nameTaken, codeTaken });
+  } catch (err: any) {
+    return res.status(500).json({ message: err.message || 'Validation error' });
+  }
+});
+
+// Register Team Flow (creates team + leader + members in pending state)
+router.post('/teams/register-team-flow', async (req: Request, res: Response) => {
+  const { teamName, teamCode, leader, members, teamStatus, availableSlots } = req.body;
+
+  if (!teamName || !teamCode || !leader || !members || !Array.isArray(members)) {
+    return res.status(400).json({ message: 'Missing team name, team code, leader, or members details.' });
+  }
+
+  const cleanTeamName = String(teamName).trim();
+  const cleanTeamCode = String(teamCode).trim();
+  const totalMembersCount = 1 + members.length;
+
+  try {
+    // 1. Validate team uniqueness
+    const existingName = await Teams.findOne(t => t.name.toLowerCase() === cleanTeamName.toLowerCase());
+    if (existingName) {
+      return res.status(400).json({ message: 'Team Name is already taken.' });
+    }
+
+    const existingCode = await Teams.findOne(t => t.id.toLowerCase() === cleanTeamCode.toLowerCase());
+    if (existingCode) {
+      return res.status(400).json({ message: 'Team Code is already taken.' });
+    }
+
+    // 2. Validate team size (3 to 5 total members)
+    if (totalMembersCount < 3 || totalMembersCount > 5) {
+      return res.status(400).json({ message: 'Your team must have between 3 and 5 members, including the Team Leader.' });
+    }
+
+    // 3. Validate female participant requirement
+    const allGenders = [leader.gender, ...members.map(m => m.gender)];
+    const hasFemale = allGenders.some(g => String(g).trim().toLowerCase() === 'female');
+    if (!hasFemale) {
+      return res.status(400).json({ message: 'At least one female participant is required in every team.' });
+    }
+
+    // 4. Validate unique email addresses and not already in team/database
+    const allEmails = [leader.email, ...members.map(m => m.email)].map(e => String(e).trim().toLowerCase());
+    const uniqueEmails = new Set(allEmails);
+    if (uniqueEmails.size !== allEmails.length) {
+      return res.status(400).json({ message: 'Duplicate emails detected in the team list.' });
+    }
+
+    for (const email of allEmails) {
+      const existingUser = await Users.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ message: `Email ${email} is already registered.` });
+      }
+    }
+
+    // 4.1. Validate unique Roll/ID numbers
+    const allRolls = [leader.rollNumber, ...members.map(m => m.rollNumber)].map(r => String(r).trim().toUpperCase());
+    const uniqueRolls = new Set(allRolls);
+    if (uniqueRolls.size !== allRolls.length) {
+      return res.status(400).json({ message: 'Duplicate Roll/ID numbers detected in the team list.' });
+    }
+
+    for (const rollNumber of allRolls) {
+      if (rollNumber) {
+        const existingRoll = await Users.findOne({ rollNumber });
+        if (existingRoll) {
+          return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
+        }
+      }
+    }
+
+    // 4.2. Validate unique phone numbers
+    const allPhones = [leader.phone, ...members.map(m => m.phone)].map(p => String(p).trim());
+    const uniquePhones = new Set(allPhones);
+    if (uniquePhones.size !== allPhones.length) {
+      return res.status(400).json({ message: 'Duplicate phone numbers detected in the team list.' });
+    }
+
+    for (const phone of allPhones) {
+      if (phone) {
+        const existingPhone = await Users.findOne({ phone });
+        if (existingPhone) {
+          return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
+        }
+      }
+    }
+
+    // 5. Create or retrieve/update leader user
+    let leaderUser = await Users.findOne({ email: leader.email.toLowerCase() });
+    const leaderId = leaderUser ? leaderUser.id : `u_${Math.random().toString(36).substring(2, 9)}`;
+
+    const leaderData = {
+      id: leaderId,
+      name: leader.name,
+      email: leader.email.toLowerCase(),
+      phone: leader.phone,
+      college: leader.college,
+      rollNumber: leader.rollNumber,
+      branch: leader.branch,
+      year: leader.year,
+      gender: leader.gender,
+      tshirtSize: leader.tshirtSize || 'M',
+      linkedin: leader.linkedin || '',
+      role: 'team-leader' as const,
+      paymentStatus: 'pending' as const,
+      amountPaid: 0,
+      checkedIn: false,
+      profileCompleted: true,
+      registrationType: 'TEAM' as const,
+      teamId: cleanTeamCode,
+      teamRole: 'leader' as const,
+      createdAt: leaderUser?.createdAt || new Date().toISOString()
+    };
+
+    if (leaderUser) {
+      await Users.updateOne(leaderUser.id, leaderData);
+      leaderUser = await Users.findOne({ id: leaderUser.id });
+    } else {
+      leaderUser = await Users.create(leaderData);
+    }
+
+    // 6. Create or retrieve/update member users
+    const memberIds: string[] = [];
+    for (const m of members) {
+      let memberUser = await Users.findOne({ email: m.email.toLowerCase() });
+      const mId = memberUser ? memberUser.id : `u_${Math.random().toString(36).substring(2, 9)}`;
+      
+      const memberData = {
+        id: mId,
+        name: m.name,
+        email: m.email.toLowerCase(),
+        phone: m.phone || leader.phone, // fallback phone
+        college: m.college || leader.college, // fallback college
+        rollNumber: m.rollNumber,
+        branch: m.branch,
+        year: m.year,
+        gender: m.gender,
+        tshirtSize: m.tshirtSize || 'M',
+        linkedin: m.linkedin || '',
+        role: 'participant' as const,
+        paymentStatus: 'pending' as const,
+        amountPaid: 0,
+        checkedIn: false,
+        profileCompleted: true,
+        registrationType: 'TEAM' as const,
+        teamId: cleanTeamCode,
+        teamRole: 'member' as const,
+        createdAt: memberUser?.createdAt || new Date().toISOString()
+      };
+
+      if (memberUser) {
+        await Users.updateOne(memberUser.id, memberData);
+      } else {
+        await Users.create(memberData);
+      }
+      memberIds.push(mId);
+    }
+
+    // 7. Create the Team in pending state
+    const allTeamMembers = [leaderId, ...memberIds];
+    const team = await Teams.create({
+      id: cleanTeamCode,
+      name: cleanTeamName,
+      description: 'Created during team registration.',
+      college: leader.college,
+      leaderId: leaderId,
+      members: allTeamMembers,
+      memberCount: allTeamMembers.length,
+      remainingSlots: 5 - allTeamMembers.length,
+      paidSlots: allTeamMembers.length,
+      availableSlots: teamStatus === 'OPEN' ? (Number(availableSlots) || 0) : 0,
+      teamStatus: teamStatus === 'OPEN' ? 'OPEN' : 'CLOSED',
+      status: allTeamMembers.length >= 5 ? 'full' as const : 'open' as const,
+      inviteLink: `http://localhost:3500/teams/join?teamId=${cleanTeamCode}`,
+      joinRequests: [],
+      paymentStatus: 'pending' as const,
+      createdAt: new Date().toISOString()
+    });
+
+    const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ success: true, token, user: leaderUser, team });
+  } catch (err: any) {
+    console.error('[Register Team Flow Error]:', err);
+    return res.status(500).json({ message: err.message || 'Server error during team registration.' });
+  }
+});
 
 // --- TEAMS ENDPOINTS (AUTHENTICATED) ---
 
@@ -602,7 +1198,7 @@ router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Re
     return res.status(400).json({ message: 'You are already in a team' });
   }
 
-  const teamId = customTeamId || (name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') + `-${Math.random().toString(36).substring(2, 6)}`);
+  const teamId = customTeamId || await generateTeamId();
   
   const team = await Teams.create({
     id: teamId,
@@ -613,6 +1209,7 @@ router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Re
     leaderId: user.id,
     members: [user.id],
     remainingSlots: 4, // Team of max 5
+    paidSlots: user.tempSlots || 1, // Store total paid slots
     status: 'open',
     inviteLink: `http://localhost:3000/teams/join?teamId=${teamId}`,
     joinRequests: [],
@@ -629,6 +1226,311 @@ router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Re
   return res.json({ success: true, team, user: updatedUser });
 });
 
+// Set Team Availability (open/closed status and slots)
+router.post('/teams/set-availability', authenticateToken, async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { teamStatus, availableSlots } = req.body;
+
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!teamStatus) return res.status(400).json({ message: 'Team status is required.' });
+
+  try {
+    const user = await Users.findOne({ id: userId });
+    if (!user || user.role !== 'team-leader' || !user.teamId) {
+      return res.status(400).json({ message: 'Only team leaders can modify team availability.' });
+    }
+
+    const team = await Teams.findOne({ id: user.teamId });
+    if (!team) return res.status(404).json({ message: 'Team not found.' });
+
+    const maxAvailableSlots = 5 - team.members.length;
+    let slots = Number(availableSlots) || 0;
+
+    if (teamStatus === 'OPEN') {
+      if (team.members.length >= 5) {
+        return res.status(400).json({ message: 'Team is already full. Cannot keep team open.' });
+      }
+      if (slots < 1 || slots > maxAvailableSlots) {
+        return res.status(400).json({ message: `Available slots must be between 1 and ${maxAvailableSlots}.` });
+      }
+    } else {
+      slots = 0;
+    }
+
+    await Teams.updateOne(team.id, {
+      teamStatus: teamStatus as 'OPEN' | 'CLOSED',
+      availableSlots: slots
+    });
+
+    const updatedTeam = await Teams.findOne({ id: team.id });
+    return res.json({ success: true, team: updatedTeam });
+  } catch (err: any) {
+    console.error('[Set Availability Error]:', err);
+    return res.status(500).json({ message: err.message || 'Failed to update team availability.' });
+  }
+});
+
+// 1.5. Add Member directly (Team Leader Only, handles UTR payment submission)
+router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const leader = await Users.findOne({ id: userId });
+  if (!leader || leader.teamRole !== 'leader' || !leader.teamId) {
+    return res.status(400).json({ message: 'Only team leaders can add members.' });
+  }
+
+  const team = await Teams.findOne({ id: leader.teamId });
+  if (!team) return res.status(404).json({ message: 'Team not found.' });
+
+  const { utr, members: membersArray } = req.body;
+
+  // ── MULTI-MEMBER MODE (array payload from dashboard modal) ──
+  if (Array.isArray(membersArray) && membersArray.length > 0) {
+    if (!utr || typeof utr !== 'string' || !utr.trim()) {
+      return res.status(400).json({ message: 'Transaction UTR is required.' });
+    }
+    const sanitizedUtr = utr.replace(/\s+/g, '').trim();
+    if (sanitizedUtr.length < 12) {
+      return res.status(400).json({ message: 'UTR number must be at least 12 characters long.' });
+    }
+
+    // Capacity check
+    if (team.members.length + membersArray.length > 5) {
+      return res.status(400).json({
+        message: `Adding ${membersArray.length} member(s) would exceed the team limit of 5. Your team currently has ${team.members.length} member(s).`
+      });
+    }
+
+    // Check UTR uniqueness
+    const duplicateUtr = await Users.findOne((u: any) => u.utr === sanitizedUtr);
+    if (duplicateUtr) {
+      return res.status(400).json({ message: 'This UTR has already been submitted by another user.' });
+    }
+
+    const addedUsers: any[] = [];
+    for (const m of membersArray) {
+      const { name, email, phone, rollNumber, college, branch, year, gender, tshirtSize, foodPreference } = m;
+      if (!name || !email) continue;
+
+      let targetUser = await Users.findOne({ email: email.toLowerCase() });
+      if (targetUser && targetUser.teamId) continue; // skip if already in a team
+
+      if (!targetUser) {
+        targetUser = await Users.create({
+          id: `u_${Math.random().toString(36).substring(2, 9)}`,
+          name,
+          email: email.toLowerCase(),
+          phone: phone || leader.phone,
+          college: college || leader.college,
+          rollNumber: rollNumber || '',
+          branch: branch || 'Unknown',
+          year: year || '1st Year',
+          gender: gender || 'Male',
+          tshirtSize: tshirtSize || 'M',
+          foodPreference: foodPreference || 'Veg',
+          linkedin: '',
+          role: 'participant',
+          paymentStatus: 'submitted',
+          utr: sanitizedUtr,
+          amountPaid: 0,
+          checkedIn: false,
+          profileCompleted: true,
+          createdAt: new Date().toISOString()
+        });
+      } else {
+        await Users.updateOne(targetUser.id, {
+          paymentStatus: 'submitted',
+          utr: sanitizedUtr,
+          amountPaid: 0,
+          phone: phone || targetUser.phone || leader.phone,
+          college: college || targetUser.college || leader.college,
+          rollNumber: rollNumber || targetUser.rollNumber || '',
+          branch: branch || targetUser.branch || 'Unknown',
+          year: year || targetUser.year || '1st Year',
+          gender: gender || targetUser.gender || 'Male',
+          tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
+          foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
+          profileCompleted: true
+        });
+      }
+
+      await Users.updateOne(targetUser.id, { teamId: team.id, teamRole: 'member', role: 'participant' });
+      if (!team.members.includes(targetUser.id)) {
+        team.members.push(targetUser.id);
+      }
+      addedUsers.push(targetUser);
+
+      // Send email to each added member
+      try {
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const completeLink = `${frontendUrl.split(',')[0]}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
+        await transporter.sendMail({
+          from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+          to: targetUser.email,
+          subject: 'You\'ve been added to a team - CodeSprint 2026',
+          html: `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;border:1px solid #e2e8f0;border-radius:12px;">
+            <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
+            <p>Dear <strong>${targetUser.name}</strong>,</p>
+            <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong>.</p>
+            <p>Your registration is pending admin approval.</p>
+            <div style="text-align:center;margin:24px 0;">
+              <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
+            </div>
+          </div>`
+        });
+      } catch (err) {
+        console.error('Email send failed for', m.email, err);
+      }
+    }
+
+    // Update team membership count
+    await Teams.updateOne(team.id, {
+      members: team.members,
+      remainingSlots: Math.max(0, 5 - team.members.length),
+      status: team.members.length >= 5 ? 'full' : 'open'
+    });
+
+    const updatedTeam = await Teams.findOne({ id: team.id });
+    return res.json({ success: true, message: `${addedUsers.length} member(s) submitted. Awaiting admin approval.`, team: updatedTeam });
+  }
+
+  // ── SINGLE MEMBER MODE (legacy / backwards compat) ──
+  const { name, email, phone, rollNumber, college, branch, year, gender, tshirtSize, foodPreference } = req.body;
+  if (!name || !email || !utr) {
+    return res.status(400).json({ message: 'Name, Email, and Transaction UTR are required.' });
+  }
+
+  if (team.members.length >= 5) {
+    return res.status(400).json({ message: 'Your team already has the maximum of 5 members.' });
+  }
+
+  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
+  if (sanitizedUtr.length < 12) {
+    return res.status(400).json({ message: 'UTR number must be at least 12 characters long.' });
+  }
+
+  const duplicateUtr = await Users.findOne((u: any) => u.utr === sanitizedUtr);
+  if (duplicateUtr) {
+    return res.status(400).json({ message: 'This UTR has already been submitted by another user.' });
+  }
+
+  let targetUser = await Users.findOne({ email: email.toLowerCase() });
+  if (targetUser && targetUser.teamId) {
+    return res.status(400).json({ message: 'This user is already in a team.' });
+  }
+
+  if (!targetUser) {
+    targetUser = await Users.create({
+      id: `u_${Math.random().toString(36).substring(2, 9)}`,
+      name, email: email.toLowerCase(),
+      phone: phone || leader.phone, college: college || leader.college,
+      rollNumber: rollNumber || '', branch: branch || 'Unknown',
+      year: year || '1st Year', gender: gender || 'Male',
+      tshirtSize: tshirtSize || 'M', foodPreference: foodPreference || 'Veg',
+      linkedin: '', role: 'participant', paymentStatus: 'submitted',
+      utr: sanitizedUtr, amountPaid: 0, checkedIn: false,
+      profileCompleted: true, createdAt: new Date().toISOString()
+    });
+  } else {
+    await Users.updateOne(targetUser.id, {
+      paymentStatus: 'submitted', utr: sanitizedUtr, amountPaid: 0,
+      phone: phone || targetUser.phone || leader.phone,
+      college: college || targetUser.college || leader.college,
+      rollNumber: rollNumber || targetUser.rollNumber || '',
+      branch: branch || targetUser.branch || 'Unknown',
+      year: year || targetUser.year || '1st Year',
+      gender: gender || targetUser.gender || 'Male',
+      tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
+      foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
+      profileCompleted: true
+    });
+  }
+
+  await Users.updateOne(targetUser.id, { teamId: team.id, teamRole: 'member', role: 'participant' });
+
+  if (!team.members.includes(targetUser.id)) {
+    const updatedMembers = [...team.members, targetUser.id];
+    await Teams.updateOne(team.id, {
+      members: updatedMembers,
+      remainingSlots: Math.max(0, 5 - updatedMembers.length),
+      status: updatedMembers.length >= 5 ? 'full' : 'open'
+    });
+  }
+
+  try {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const completeLink = `${frontendUrl.split(',')[0]}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
+    await transporter.sendMail({
+      from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+      to: targetUser.email,
+      subject: 'Complete Your Registration - CodeSprint 2026',
+      html: `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;border:1px solid #e2e8f0;border-radius:12px;">
+        <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
+        <p>Dear <strong>${targetUser.name}</strong>,</p>
+        <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong> for CodeSprint 2026.</p>
+        <p>Your registration request is pending admin verification.</p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
+        </div>
+      </div>`
+    });
+  } catch (err) {
+    console.error('Failed to send confirmation email:', err);
+  }
+
+  const updatedTeam = await Teams.findOne({ id: team.id });
+  return res.json({ success: true, message: 'Member request submitted. Awaiting admin approval.', team: updatedTeam });
+});
+
+// 1b. Request Extra Team Slots (Leader only)
+router.post('/teams/request-extra-slots', authenticateToken, async (req: AuthRequest, res: Response) => {
+  const { slots, utr } = req.body;
+  const userId = req.user?.id;
+
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!slots || isNaN(slots) || Number(slots) <= 0) {
+    return res.status(400).json({ message: 'Valid slot count is required.' });
+  }
+  if (!utr || typeof utr !== 'string' || !utr.trim()) {
+    return res.status(400).json({ message: 'Transaction UTR is required.' });
+  }
+
+  const user = await Users.findOne({ id: userId });
+  if (!user || !user.teamId) {
+    return res.status(400).json({ message: 'Only team members/leaders can request slots.' });
+  }
+
+  const team = await Teams.findOne({ id: user.teamId });
+  if (!team) return res.status(404).json({ message: 'Team not found.' });
+
+  if (team.leaderId !== userId) {
+    return res.status(403).json({ message: 'Only the team leader can request extra slots.' });
+  }
+
+  const requestedSlots = Number(slots);
+  const currentPaid = team.paidSlots || 1;
+
+  if (currentPaid + requestedSlots > 5) {
+    return res.status(400).json({ message: 'A team can have a maximum of 5 slots total.' });
+  }
+
+  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
+  if (sanitizedUtr.length < 12) {
+    return res.status(400).json({ message: 'UTR must be at least 12 characters long.' });
+  }
+
+  // Update team with pending extra slots request
+  await Teams.updateOne(team.id, {
+    extraSlotsPending: requestedSlots,
+    extraSlotsUtr: sanitizedUtr,
+    extraSlotsStatus: 'submitted'
+  });
+
+  const updatedTeam = await Teams.findOne({ id: team.id });
+  return res.json({ success: true, message: 'Extra slots request submitted. Awaiting admin approval.', team: updatedTeam });
+});
+
 // 2. Request to Join a Team
 router.post('/teams/join-request', authenticateToken, async (req: AuthRequest, res: Response) => {
   const { teamId } = req.body;
@@ -639,34 +1541,36 @@ router.post('/teams/join-request', authenticateToken, async (req: AuthRequest, r
   const user = await Users.findOne({ id: userId });
   if (!user) return res.status(404).json({ message: 'User not found' });
 
+  const team = await Teams.findOne({ id: teamId });
+  if (!team) return res.status(404).json({ message: 'Team not found' });
+
   if (user.paymentStatus !== 'paid') {
-    return res.status(400).json({ message: 'Payment is required to join a team' });
+    return res.status(400).json({ message: 'Payment is required to join this team.' });
   }
 
   if (user.teamId) {
     return res.status(400).json({ message: 'You are already in a team' });
   }
 
-  const team = await Teams.findOne({ id: teamId });
-  if (!team) return res.status(404).json({ message: 'Team not found' });
-
-  if (team.status === 'full' || team.remainingSlots <= 0) {
-    return res.status(400).json({ message: 'Team is already full' });
+  if (team.teamStatus === 'CLOSED' || (team.availableSlots !== undefined && team.availableSlots <= 0) || team.members.length >= 5) {
+    return res.status(400).json({ message: 'Team is already full or closed to requests' });
   }
 
   // Check if request already pending
-  const alreadyRequested = team.joinRequests.some(r => r.userId === user.id && r.status === 'pending');
+  const alreadyRequested = team.joinRequests.some(r => r.userId === user.id && (r.status === 'pending' || r.status === 'PENDING'));
   if (alreadyRequested) {
     return res.status(400).json({ message: 'Join request is already pending' });
   }
 
   // Add join request
   const updatedRequests = [...team.joinRequests, {
+    requestId: uuidv4(),
     userId: user.id,
     name: user.name,
     email: user.email,
     college: user.college,
-    status: 'pending' as const
+    status: 'PENDING' as const,
+    requestedAt: new Date().toISOString()
   }];
 
   await Teams.updateOne(team.id, { joinRequests: updatedRequests });
@@ -699,67 +1603,101 @@ router.post('/teams/respond-request', authenticateToken, async (req: AuthRequest
     return res.status(403).json({ message: 'Only the team leader can respond to requests' });
   }
 
-  const request = team.joinRequests.find(r => r.userId === requestUserId && r.status === 'pending');
+  const request = team.joinRequests.find(r => r.userId === requestUserId && (r.status === 'pending' || r.status === 'PENDING'));
   if (!request) {
     return res.status(404).json({ message: 'Pending request not found' });
   }
 
-  if (status === 'approved') {
-    if (team.remainingSlots <= 0) {
-      return res.status(400).json({ message: 'No slots available in your team' });
+  const teamModel = (Teams as any).model;
+
+  if (status === 'approved' || status === 'ACCEPTED') {
+    // Perform atomic findOneAndUpdate to prevent race conditions on vacancy
+    const teamDoc = await teamModel.findOneAndUpdate(
+      {
+        id: teamId,
+        leaderId: userId,
+        teamStatus: 'OPEN',
+        availableSlots: { $gt: 0 },
+        members: { $ne: requestUserId } // ensure not already member
+      },
+      {
+        $push: { members: requestUserId },
+        $inc: { availableSlots: -1 }
+      },
+      { new: true }
+    );
+
+    if (!teamDoc) {
+      return res.status(400).json({ message: 'Failed to accept request. Team may be full, closed, or participant is already a member.' });
+    }
+
+    const teamObj = teamDoc.toObject();
+
+    // Check if team is now full/closed
+    if (teamObj.availableSlots <= 0 || teamObj.members.length >= 5) {
+      await teamModel.updateOne(
+        { id: teamId },
+        { $set: { teamStatus: 'CLOSED', status: 'full' } }
+      );
+    }
+
+    // Now update request status inside the team document's joinRequests array
+    await teamModel.updateOne(
+      { id: teamId, "joinRequests.userId": requestUserId },
+      { 
+        $set: { 
+          "joinRequests.$.status": 'ACCEPTED',
+          "joinRequests.$.respondedAt": new Date().toISOString()
+        } 
+      }
+    );
+
+    // Cancel other pending join requests for this user across all teams
+    const allTeams = await Teams.find({});
+    for (const t of allTeams) {
+      const userReqIdx = t.joinRequests.findIndex(r => r.userId === requestUserId && (r.status === 'pending' || r.status === 'PENDING'));
+      if (userReqIdx !== -1) {
+        const updatedReqs = t.joinRequests.map(r => 
+          (r.userId === requestUserId && (r.status === 'pending' || r.status === 'PENDING'))
+            ? { ...r, status: 'CANCELLED' as const, respondedAt: new Date().toISOString() }
+            : r
+        );
+        await teamModel.updateOne({ id: t.id }, { $set: { joinRequests: updatedReqs } });
+      }
     }
 
     const memberUser = await Users.findOne({ id: requestUserId });
-    if (!memberUser) return res.status(404).json({ message: 'Requesting user not found' });
-    
-    if (memberUser.teamId) {
-      // Remove from requests, since they joined another team
-      const updatedRequests = team.joinRequests.filter(r => r.userId !== requestUserId);
-      await Teams.updateOne(team.id, { joinRequests: updatedRequests });
-      return res.status(400).json({ message: 'User is already in another team' });
+    if (memberUser) {
+      // Update member profile
+      await Users.updateOne(requestUserId, {
+        teamId: teamId,
+        teamRole: 'member',
+        role: 'participant'
+      });
     }
-
-    // Add to members
-    const updatedMembers = [...team.members, requestUserId];
-    const newSlots = Math.max(0, team.remainingSlots - 1);
-    const teamStatus = newSlots === 0 ? 'full' as const : 'open' as const;
-
-    // Filter out this pending request and update status
-    const updatedRequests = team.joinRequests.map(r => 
-      r.userId === requestUserId ? { ...r, status: 'approved' as const } : r
-    );
-
-    await Teams.updateOne(team.id, {
-      members: updatedMembers,
-      remainingSlots: newSlots,
-      status: teamStatus,
-      joinRequests: updatedRequests
-    });
-
-    // Update member profile
-    await Users.updateOne(requestUserId, {
-      teamId: team.id,
-      teamRole: 'member'
-    });
 
     // Notify applicant
     await Notifications.create({
       recipientType: 'individual',
       recipientTarget: requestUserId,
       title: 'Request Approved!',
-      message: `Congratulations! You have been accepted into team "${team.name}".`,
+      message: `Congratulations! You have been accepted into team "${teamObj.name}".`,
       type: 'success',
       readBy: [],
       createdAt: new Date().toISOString()
     });
 
   } else {
-    // Reject
-    const updatedRequests = team.joinRequests.map(r => 
-      r.userId === requestUserId ? { ...r, status: 'rejected' as const } : r
+    // Reject request
+    await teamModel.updateOne(
+      { id: teamId, "joinRequests.userId": requestUserId },
+      { 
+        $set: { 
+          "joinRequests.$.status": 'REJECTED',
+          "joinRequests.$.respondedAt": new Date().toISOString()
+        } 
+      }
     );
-
-    await Teams.updateOne(team.id, { joinRequests: updatedRequests });
 
     // Notify applicant
     await Notifications.create({
@@ -773,7 +1711,7 @@ router.post('/teams/respond-request', authenticateToken, async (req: AuthRequest
     });
   }
 
-  const updatedTeam = await Teams.findOne({ id: team.id });
+  const updatedTeam = await Teams.findOne({ id: teamId });
   return res.json({ success: true, team: updatedTeam });
 });
 
@@ -835,7 +1773,23 @@ router.get('/teams/my-team', authenticateToken, async (req: AuthRequest, res: Re
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
   const user = await Users.findOne({ id: userId });
-  if (!user || !user.teamId) {
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  
+  if (!user.teamId) {
+    const allTeams = await Teams.find({});
+    const pendingTeam = allTeams.find(t => 
+      t.joinRequests?.some(r => r.userId === userId && (r.status === 'pending' || r.status === 'PENDING'))
+    );
+    if (pendingTeam) {
+      return res.json({ 
+        team: null, 
+        pendingRequestTeam: {
+          id: pendingTeam.id,
+          name: pendingTeam.name,
+          leaderId: pendingTeam.leaderId
+        }
+      });
+    }
     return res.json({ team: null });
   }
 
@@ -852,15 +1806,40 @@ router.get('/teams/my-team', authenticateToken, async (req: AuthRequest, res: Re
         email: mUser?.email || '',
         college: mUser?.college || '',
         phone: mUser?.phone || '',
+        gender: mUser?.gender || '',
+        branch: mUser?.branch || '',
+        year: mUser?.year || '',
         checkedIn: mUser?.checkedIn || false,
-        paymentStatus: mUser?.paymentStatus || 'pending'
+        paymentStatus: mUser?.paymentStatus || 'pending',
+        profileCompleted: mUser?.profileCompleted !== false
+      };
+    })
+  );
+
+  // Fetch enriched join request details
+  const enrichedRequests = await Promise.all(
+    (team.joinRequests || []).map(async (req) => {
+      const requester = await Users.findOne({ id: req.userId });
+      return {
+        userId: req.userId,
+        name: req.name,
+        email: req.email,
+        college: requester?.college || req.college,
+        status: req.status,
+        requestId: req.requestId,
+        requestedAt: req.requestedAt,
+        respondedAt: req.respondedAt,
+        gender: requester?.gender || '',
+        branch: requester?.branch || '',
+        year: requester?.year || ''
       };
     })
   );
 
   return res.json({
     ...team,
-    members: fullMembers
+    members: fullMembers,
+    joinRequests: enrichedRequests
   });
 });
 
@@ -876,6 +1855,8 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
   const totalRegistrations = allUsers.filter(u => u.role !== 'admin').length;
   const paidParticipants = allUsers.filter(u => u.paymentStatus === 'paid' && u.role !== 'admin').length;
   const pendingPayments = allUsers.filter(u => u.paymentStatus === 'pending' && u.role !== 'admin').length;
+  const submittedPayments = allUsers.filter(u => u.paymentStatus === 'submitted' && u.role !== 'admin').length;
+  const rejectedPayments = allUsers.filter(u => u.paymentStatus === 'rejected' && u.role !== 'admin').length;
   const totalTeams = allTeams.length;
   const availableSlots = 200 - paidParticipants; // e.g. Limit 200 attendees
   const checkedInCount = allUsers.filter(u => u.checkedIn && u.role !== 'admin').length;
@@ -911,6 +1892,8 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
     totalRegistrations,
     paidParticipants,
     pendingPayments,
+    submittedPayments,
+    rejectedPayments,
     totalTeams,
     availableSlots,
     totalRevenue,
@@ -929,12 +1912,25 @@ router.get('/admin/participants', authenticateToken, requireAdmin, async (req: R
   // Attach team names for display
   const allTeams = await Teams.find();
   const teamMap: Record<string, string> = {};
-  allTeams.forEach(t => { teamMap[t.id] = t.name; });
+  const teamMemberCountMap: Record<string, number> = {};
+  allTeams.forEach(t => {
+    teamMap[t.id] = t.name;
+    teamMemberCountMap[t.id] = (t.members || []).length;
+  });
 
-  const enriched = list.map(u => ({
-    ...u,
-    teamName: u.teamId ? (teamMap[u.teamId] || u.teamId) : null
-  }));
+  const enriched = list.map(u => {
+    let expectedAmount = 399;
+    if (u.role === 'team-leader' && u.teamId) {
+      expectedAmount = (teamMemberCountMap[u.teamId] || 1) * 399;
+    } else if (u.role === 'participant' && u.teamId) {
+      expectedAmount = 0;
+    }
+    return {
+      ...u,
+      teamName: u.teamId ? (teamMap[u.teamId] || u.teamId) : null,
+      expectedAmount
+    };
+  });
 
   if (search) {
     const term = String(search).toLowerCase();
@@ -1032,6 +2028,130 @@ router.post('/admin/check-in', authenticateToken, requireAdmin, async (req: Requ
   return res.json({ success: true, message: `${user.name} checked in successfully.`, user: updatedUser });
 });
 
+// 3b. Verify UTR Payment Request
+router.post('/admin/verify-utr', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { userId, action } = req.body;
+  if (!userId || !action) {
+    return res.status(400).json({ message: 'User ID and Action (approve/reject) are required' });
+  }
+
+  const user = await Users.findOne({ id: userId });
+  if (!user) return res.status(404).json({ message: 'User not found' });
+
+  if (action === 'approve') {
+    const paymentId = user.utr || `utr_approved_${Math.floor(100000 + Math.random() * 900000)}`;
+    
+    // 1. Update user to paid (or cascade update for team members)
+    if (user.role === 'team-leader' && user.teamId) {
+      const team = await Teams.findOne({ id: user.teamId });
+      const totalAmount = team ? team.members.length * 399 : 399;
+      await handleTeamPaymentSuccess(user.teamId, paymentId, totalAmount);
+    } else {
+      await Users.updateOne(user.id, {
+        paymentStatus: 'paid',
+        amountPaid: 399,
+        paymentId: paymentId
+      });
+      if (user.teamId) {
+        const team = await Teams.findOne({ id: user.teamId });
+        if (team) {
+          const currentPaid = team.paidSlots || 1;
+          await Teams.updateOne(team.id, {
+            paidSlots: currentPaid + 1
+          });
+        }
+      }
+      // Process auto-team preference for individuals
+      await processUserTeamPreference(user.id);
+    }
+
+    // 2. Create notification
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: user.id,
+      title: 'Payment Approved',
+      message: `Your payment was verified by admin. Your account has been activated!`,
+      type: 'success',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+
+    // 3. Send WhatsApp confirmation email (just like in verify)
+    try {
+      await transporter.sendMail({
+        from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+        to: user.email,
+        subject: 'Registration Confirmed - CodeSprint 2026',
+        html: `
+          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+            <div style="text-align: center; margin-bottom: 30px;">
+              <h1 style="color: #6d28d9; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">CodeSprint 2026</h1>
+              <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Audisankara University</p>
+            </div>
+            
+            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              Dear <strong>${user.name}</strong>,
+            </p>
+            
+            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              Greetings from Audisankara University.
+            </p>
+            
+            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              We sincerely thank you for registering for CodeSprint 2026. Your payment of ₹399 has been verified and your account is now activated.
+            </p>
+            
+            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px;">
+              Please join the official WhatsApp group for updates:
+            </p>
+
+            <div style="background-color: #f8fafc; border-left: 4px solid #22c55e; padding: 20px; border-radius: 4px; margin-bottom: 30px;">
+              <p style="color: #0f172a; font-weight: 600; margin-top: 0; margin-bottom: 15px; font-size: 15px;">Please join in this group 👇</p>
+              <a href="https://chat.whatsapp.com/IA1BaLQ7gpu46RrbEz7mN7" style="display: inline-block; background-color: #22c55e; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 2px 4px rgba(34, 197, 94, 0.3);">
+                Join WhatsApp Group
+              </a>
+            </div>
+            
+            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
+              You can now log in to choose your team creation preference.
+            </p>
+            
+            <div style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
+              <p style="color: #475569; font-size: 15px; line-height: 1.5; margin: 0;">
+                Warm regards,<br>
+                <strong>CodeSprint 2026</strong><br>
+                Audisankara University
+              </p>
+            </div>
+          </div>
+        `
+      });
+      console.log(`[Email] Sent registration confirmation to ${user.email} after admin UTR approval.`);
+    } catch (err) {
+      console.error('Failed to send registration confirmation email after admin approval:', err);
+    }
+  } else if (action === 'reject') {
+    await Users.updateOne(user.id, {
+      paymentStatus: 'rejected'
+    });
+
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: user.id,
+      title: 'Payment Verification Rejected',
+      message: `Your payment request was rejected by admin. Please contact support or resubmit UTR.`,
+      type: 'warning',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+  } else {
+    return res.status(400).json({ message: 'Invalid action. Must be "approve" or "reject".' });
+  }
+
+  const updatedUser = await Users.findOne({ id: user.id });
+  return res.json({ success: true, message: `Payment registration successfully ${action}d.`, user: updatedUser });
+});
+
 // 4. Coupons listing (with usage count)
 router.get('/admin/coupons', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
   const list = await Coupons.find();
@@ -1092,6 +2212,65 @@ router.get('/admin/teams', authenticateToken, requireAdmin, async (req: Request,
     };
   }));
   return res.json(enhancedTeams);
+});
+
+// 7b. Approve/Reject extra slots request for a team
+router.post('/admin/verify-extra-slots', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { teamId, action } = req.body;
+  if (!teamId || !action) {
+    return res.status(400).json({ message: 'Team ID and Action (approve/reject) are required.' });
+  }
+
+  const team = await Teams.findOne({ id: teamId });
+  if (!team) return res.status(404).json({ message: 'Team not found.' });
+
+  if (action === 'approve') {
+    const extraSlots = team.extraSlotsPending || 0;
+    const newPaidSlots = (team.paidSlots || 1) + extraSlots;
+    const newRemainingSlots = newPaidSlots - team.members.length;
+
+    await Teams.updateOne(team.id, {
+      paidSlots: newPaidSlots,
+      remainingSlots: Math.max(0, newRemainingSlots),
+      extraSlotsStatus: 'approved',
+      extraSlotsPending: 0,
+      extraSlotsUtr: undefined
+    });
+
+    // Create notification for the leader
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: team.leaderId,
+      title: 'Extra Slots Approved',
+      message: `Your request for +${extraSlots} extra slots has been approved by admin!`,
+      type: 'success',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+
+  } else if (action === 'reject') {
+    await Teams.updateOne(team.id, {
+      extraSlotsStatus: 'rejected',
+      extraSlotsPending: 0,
+      extraSlotsUtr: undefined
+    });
+
+    // Create notification for the leader
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: team.leaderId,
+      title: 'Extra Slots Rejected',
+      message: `Your request for extra slots has been rejected by admin.`,
+      type: 'warning',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+  } else {
+    return res.status(400).json({ message: 'Invalid action. Must be "approve" or "reject".' });
+  }
+
+  const updatedTeam = await Teams.findOne({ id: team.id });
+  return res.json({ success: true, message: `Extra slots request successfully ${action}d.`, team: updatedTeam });
 });
 
 // 8. Delete a Team
@@ -1273,7 +2452,13 @@ router.post('/teams/invite', authenticateToken, async (req: AuthRequest, res: Re
   // Check if invitee already in a team
   const invitee = await Users.findOne({ email: inviteeEmail.toLowerCase() });
   if (invitee?.teamId) return res.status(400).json({ message: 'This user is already in a team' });
-  if (invitee?.paymentStatus !== 'paid') return res.status(400).json({ message: 'User must have completed payment before joining a team' });
+  // Check if invitee has not paid, but team has available paid slots
+  const paidMembersCount = (await Users.find({ teamId: team.id, paymentStatus: 'paid' })).length;
+  const availablePaidSlots = (team.paidSlots || 1) - paidMembersCount;
+  
+  if (invitee?.paymentStatus !== 'paid' && availablePaidSlots <= 0) {
+    return res.status(400).json({ message: 'User must have completed payment to join this team (no pre-paid slots left)' });
+  }
 
   // Check duplicate pending invite
   const existing = await Invites.findOne((inv) => inv.teamId === team.id && inv.inviteeEmail === inviteeEmail.toLowerCase() && inv.status === 'pending');
@@ -1360,7 +2545,16 @@ router.post('/teams/invite-respond', authenticateToken, async (req: AuthRequest,
     status: newSlots === 0 ? 'full' : 'open'
   });
 
-  await Users.updateOne(userId, { teamId: team.id, teamRole: 'member' });
+  // Check if we should cover this user with pre-paid slots
+  const paidMembersCount = (await Users.find({ teamId: team.id, paymentStatus: 'paid' })).length;
+  const isPrepaid = team.paidSlots && team.paidSlots > paidMembersCount;
+
+  await Users.updateOne(userId, { 
+    teamId: team.id, 
+    teamRole: 'member',
+    paymentStatus: isPrepaid ? 'paid' : user.paymentStatus,
+    amountPaid: isPrepaid ? 0 : user.amountPaid
+  });
   await Invites.updateOne(inviteId, { status: 'accepted', inviteeId: userId });
 
   // Notify leader
@@ -1486,9 +2680,9 @@ router.post('/admin/colleges/upload', authenticateToken, requireAdmin, async (re
   const { csvContent } = req.body;
   if (!csvContent) return res.status(400).json({ message: 'Missing CSV content' });
 
-  // Clear existing colleges
+  // Load existing college names (case-insensitive dedup)
   const existing = await CollegesDb.find({});
-  for (const c of existing) await CollegesDb.deleteOne(c.id);
+  const existingNames = new Set(existing.map((c: any) => c.name.toLowerCase().trim()));
 
   // Parse CSV (assuming 1 column for college name)
   const lines = csvContent.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
@@ -1500,16 +2694,18 @@ router.post('/admin/colleges/upload', authenticateToken, requireAdmin, async (re
 
   for (const line of lines) {
     const name = line.replace(/(^"|"$)/g, '').trim(); // basic CSV quote stripping
-    if (name) {
+    if (name && !existingNames.has(name.toLowerCase())) {
       const col = await CollegesDb.create({
         id: `col_${uuidv4()}`,
         name,
         createdAt: new Date().toISOString()
       });
       added.push(col);
+      existingNames.add(name.toLowerCase()); // prevent intra-upload dupes too
     }
   }
-  res.json({ success: true, count: added.length, message: `Successfully imported ${added.length} colleges.` });
+  const totalNow = existing.length + added.length;
+  res.json({ success: true, count: added.length, total: totalNow, message: `Added ${added.length} new college(s). Total: ${totalNow}.` });
 });
 
 // ─── PROBLEM STATEMENTS ROUTES ───────────────────────────────────────────────

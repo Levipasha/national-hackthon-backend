@@ -15,9 +15,14 @@ export interface User {
   linkedin: string;
   portfolio?: string;
   teamPreference?: string;
+  tempTeamName?: string;
+  tempTeamCode?: string;
+  tempSlots?: number;
+  registrationType?: 'TEAM' | 'INDIVIDUAL';
   role: 'admin' | 'team-leader' | 'participant';
-  paymentStatus: 'pending' | 'paid' | 'refunded';
+  paymentStatus: 'pending' | 'submitted' | 'paid' | 'rejected' | 'refunded';
   paymentId?: string;
+  utr?: string;
   couponUsed?: string;
   amountPaid: number;
   teamId?: string;
@@ -26,6 +31,7 @@ export interface User {
   tshirtSize?: 'S' | 'M' | 'L' | 'XL' | 'XXL';
   checkedIn: boolean;
   checkInTime?: string;
+  profileCompleted?: boolean;
   createdAt: string;
 }
 
@@ -38,11 +44,28 @@ export interface Team {
   leaderId: string;
   members: string[];
   remainingSlots: number;
+  paidSlots?: number;
   status: 'open' | 'full';
+  teamStatus?: 'OPEN' | 'CLOSED';
+  availableSlots?: number;
+  memberCount?: number;
+  paymentStatus?: 'pending' | 'paid';
   inviteLink: string;
   qrCodeDataUrl?: string;
-  joinRequests: { userId: string; name: string; email: string; college: string; status: 'pending' | 'approved' | 'rejected' }[];
+  joinRequests: { 
+    userId: string; 
+    name: string; 
+    email: string; 
+    college: string; 
+    status: 'pending' | 'approved' | 'rejected' | 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED';
+    requestId?: string;
+    requestedAt?: string;
+    respondedAt?: string;
+  }[];
   createdAt: string;
+  extraSlotsPending?: number;
+  extraSlotsUtr?: string;
+  extraSlotsStatus?: 'idle' | 'submitted' | 'approved' | 'rejected';
 }
 
 export interface Coupon {
