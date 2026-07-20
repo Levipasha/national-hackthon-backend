@@ -1054,9 +1054,11 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       return res.status(400).json({ message: 'Team Name is already taken.' });
     }
 
+    let finalTeamCode = cleanTeamCode;
     const existingCode = await Teams.findOne(t => t.id.toLowerCase() === cleanTeamCode.toLowerCase());
     if (existingCode) {
-      return res.status(400).json({ message: 'Team Code is already taken.' });
+      // If code is taken (e.g. concurrent registration), generate a new unique one on the fly!
+      finalTeamCode = await generateTeamId();
     }
 
     // 2. Validate team size (3 to 5 total members)
@@ -1139,7 +1141,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       checkedIn: false,
       profileCompleted: true,
       registrationType: 'TEAM' as const,
-      teamId: cleanTeamCode,
+      teamId: finalTeamCode,
       teamRole: 'leader' as const,
       createdAt: leaderUser?.createdAt || new Date().toISOString()
     };
@@ -1175,7 +1177,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
         checkedIn: false,
         profileCompleted: true,
         registrationType: 'TEAM' as const,
-        teamId: cleanTeamCode,
+        teamId: finalTeamCode,
         teamRole: 'member' as const,
         createdAt: memberUser?.createdAt || new Date().toISOString()
       };
@@ -1191,7 +1193,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
     // 7. Create the Team in pending state
     const allTeamMembers = [leaderId, ...memberIds];
     const team = await Teams.create({
-      id: cleanTeamCode,
+      id: finalTeamCode,
       name: cleanTeamName,
       description: 'Created during team registration.',
       college: leader.college,
@@ -1203,7 +1205,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       availableSlots: teamStatus === 'OPEN' ? (Number(availableSlots) || 0) : 0,
       teamStatus: teamStatus === 'OPEN' ? 'OPEN' : 'CLOSED',
       status: allTeamMembers.length >= 5 ? 'full' as const : 'open' as const,
-      inviteLink: `http://localhost:3500/teams/join?teamId=${cleanTeamCode}`,
+      inviteLink: `http://localhost:3500/teams/join?teamId=${finalTeamCode}`,
       joinRequests: [],
       paymentStatus: 'pending' as const,
       createdAt: new Date().toISOString()
