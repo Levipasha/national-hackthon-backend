@@ -277,6 +277,35 @@ router.post('/auth/otp-send', async (req: Request, res: Response) => {
   }
 });
 
+// Check duplicate phone, roll number, or email before signup/payment
+router.get('/users/check-duplicate', async (req: Request, res: Response) => {
+  const { phone, rollNumber, email } = req.query;
+  try {
+    if (phone) {
+      const existingPhone = await Users.findOne({ phone: String(phone).trim() });
+      if (existingPhone) {
+        return res.status(200).json({ exists: true, type: 'phone', message: `Phone number ${phone} is already registered.` });
+      }
+    }
+    if (rollNumber) {
+      const existingRoll = await Users.findOne({ rollNumber: String(rollNumber).trim().toUpperCase() });
+      if (existingRoll) {
+        return res.status(200).json({ exists: true, type: 'rollNumber', message: `Roll/ID number ${rollNumber} is already registered.` });
+      }
+    }
+    if (email) {
+      const existingEmail = await Users.findOne({ email: String(email).trim().toLowerCase() });
+      if (existingEmail) {
+        return res.status(200).json({ exists: true, type: 'email', message: `Email address ${email} is already registered.` });
+      }
+    }
+    return res.status(200).json({ exists: false });
+  } catch (error) {
+    console.error('Error checking duplicate:', error);
+    return res.status(500).json({ message: 'Internal server error checking duplicate.' });
+  }
+});
+
 // 2. Verify OTP (Handles both Login & Signup)
 router.post('/auth/otp-verify', async (req: Request, res: Response) => {
   const { email, code, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, slots, foodPreference, tshirtSize } = req.body;
