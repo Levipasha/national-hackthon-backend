@@ -69,12 +69,12 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
 const generateTeamId = async (): Promise<string> => {
   const allTeams = await Teams.find({});
   let nextNum = allTeams.length + 1;
-  let teamId = `cs2026-${String(nextNum).padStart(3, '0')}`;
+  let teamId = `CS2026-${String(nextNum).padStart(3, '0')}`;
   
   let duplicate = await Teams.findOne({ id: teamId });
   while (duplicate) {
     nextNum += 1;
-    teamId = `cs2026-${String(nextNum).padStart(3, '0')}`;
+    teamId = `CS2026-${String(nextNum).padStart(3, '0')}`;
     duplicate = await Teams.findOne({ id: teamId });
   }
   return teamId;
@@ -592,6 +592,16 @@ router.get('/public/colleges', async (req: Request, res: Response) => {
   const usersList = await Users.find();
   const collegesSet = new Set(usersList.map(u => u.college).filter(Boolean));
   return res.json(Array.from(collegesSet));
+});
+
+// 3. Generate a guaranteed unique team code/ID
+router.get('/public/generate-team-code', async (req: Request, res: Response) => {
+  try {
+    const code = await generateTeamId();
+    return res.json({ success: true, code });
+  } catch (err: any) {
+    return res.status(500).json({ message: err.message || 'Error generating team code' });
+  }
 });
 
 
