@@ -15,9 +15,13 @@ async function run() {
   for (const col of collections) {
     const count = await mongoose.connection.db.collection(col.name).countDocuments();
     console.log(` - ${col.name}: ${count} documents`);
-    if (count > 0 && (col.name === 'teams' || col.name === 'users')) {
+    if (count > 0 && (col.name === 'teams' || col.name === 'users' || col.name === 'payments')) {
       const sample = await mongoose.connection.db.collection(col.name).find().toArray();
-      console.log(`   ${col.name} data:`, JSON.stringify(sample.map(d => ({ name: d.name, college: d.college, createdAt: d.createdAt })), null, 2));
+      if (col.name === 'payments') {
+        console.log(`   ${col.name} data:`, JSON.stringify(sample, null, 2));
+      } else {
+        console.log(`   ${col.name} data:`, JSON.stringify(sample.map(d => ({ name: d.name, college: d.college, createdAt: d.createdAt, id: d.id, paymentStatus: d.paymentStatus })), null, 2));
+      }
     }
   }
   await mongoose.disconnect();
