@@ -3,23 +3,33 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
+import Razorpay from 'razorpay';
+import dotenv from 'dotenv';
 import { 
   Users, Teams, Coupons, Notifications, Payments, Invites, GuestsDb, HighlightsDb, TimelineDb, CoordinatorsDb, CollegesDb, ProblemDb,
   User, Team, Coupon, Notification, PaymentLog, TeamInvite, TimelineEvent, Coordinator, College, ProblemStatement
 } from '../config/db';
 
+dotenv.config();
+
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'codesprint-secret-key-2026';
+const FRONTEND_BASE_URL = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',')[0].trim() : '';
+
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID || process.env.key_id || '',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || process.env.key_secret || ''
+});
+
+
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: 'administrator@audisankara.ac.in',
-    pass: 'svdf gsst uuqs wmrz'
+    user: process.env.EMAIL_USER || '',
+    pass: process.env.EMAIL_PASS || ''
   }
 });
-
-const otps = new Map<string, { code: string; expiresAt: number }>();
 
 // Extend Express Request interface to include user information
 export interface AuthRequest extends Request {
@@ -85,11 +95,14 @@ const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, total
     const team = await Teams.findOne({ id: teamId });
     if (!team) return;
 
-    // Update Team Payment status
-    await Teams.updateOne(team.id, { paymentStatus: 'paid' });
-
-    // Update all team members in database
     const members = await Users.find(u => u.teamId === teamId);
+
+    // Update Team Payment status
+    await Teams.updateOne(team.id, { 
+      paymentStatus: 'paid',
+      paidSlots: members.length
+    });
+
     
     for (const member of members) {
       if (member.id === team.leaderId) {
@@ -195,7 +208,7 @@ const processUserTeamPreference = async (userId: string) => {
         remainingSlots: 4, // Max 5 members
         paidSlots: user.tempSlots || 1, // Store total paid slots
         status: 'open',
-        inviteLink: `http://localhost:3000/teams/join?teamId=${teamId}`,
+        inviteLink: `${FRONTEND_BASE_URL}/teams/join?teamId=${teamId}`,
         joinRequests: [],
         createdAt: new Date().toISOString()
       });
@@ -245,38 +258,6 @@ const processUserTeamPreference = async (userId: string) => {
 
 // --- AUTHENTICATION ENDPOINTS ---
 
-// 1. Send OTP (Simulated)
-router.post('/auth/otp-send', async (req: Request, res: Response) => {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-  
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
-  otps.set(email.toLowerCase(), { code, expiresAt: Date.now() + 10 * 60 * 1000 }); // 10 minutes expiry
-
-  try {
-    await transporter.sendMail({
-      from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-      to: email,
-      subject: 'Your CodeSprint Verification Code',
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-          <h2 style="color: #6d28d9;">Welcome to CodeSprint 2026!</h2>
-          <p>Your email verification code is:</p>
-          <h1 style="letter-spacing: 4px; color: #1e293b; background: #f8fafc; padding: 10px; text-align: center; border-radius: 6px;">${code}</h1>
-          <p style="color: #64748b; font-size: 12px;">This code will expire in 10 minutes.</p>
-        </div>
-      `
-    });
-    console.log(`[OTP] Sent verification code to ${email}`);
-    return res.json({ message: 'Verification code sent to your email.' });
-  } catch (error) {
-    console.error('Email send error:', error);
-    return res.status(500).json({ message: 'Failed to send verification email' });
-  }
-});
-
 // Check duplicate phone, roll number, or email before signup/payment
 router.get('/users/check-duplicate', async (req: Request, res: Response) => {
   const { phone, rollNumber, email } = req.query;
@@ -306,24 +287,12 @@ router.get('/users/check-duplicate', async (req: Request, res: Response) => {
   }
 });
 
-// 2. Verify OTP (Handles both Login & Signup)
+// 2. Verify and Complete Details (Handles profile updates and uniqueness validation before checkout)
 router.post('/auth/otp-verify', async (req: Request, res: Response) => {
-  const { email, code, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, slots, foodPreference, tshirtSize } = req.body;
+  const { email, name, phone, college, rollNumber, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, slots, foodPreference, tshirtSize } = req.body;
 
-  if (!email || !code) {
-    return res.status(400).json({ message: 'Email and OTP code are required' });
-  }
-
-  const storedOtp = otps.get(email.toLowerCase());
-  
-  if (!storedOtp || storedOtp.code !== code || storedOtp.expiresAt < Date.now()) {
-    if (code !== '123456') { // Keeping 123456 as a master test backdoor
-      return res.status(400).json({ message: 'Invalid or expired verification code' });
-    }
-  }
-
-  if (code !== '123456') {
-    otps.delete(email.toLowerCase());
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required' });
   }
 
   let user = await Users.findOne({ email: email.toLowerCase() });
@@ -380,35 +349,12 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
       }
     }
 
-    // Create User (Participant by default)
-    user = await Users.create({
-      name,
-      email: email.toLowerCase(),
-      phone,
-      college,
-      rollNumber,
-      branch,
-      year,
-      gender,
-      linkedin,
-      portfolio,
-      teamPreference,
-      tempTeamName: teamPreference === 'Create a Team' ? teamName : undefined,
-      tempTeamCode: teamPreference === 'Join a Team' ? teamCode : undefined,
-      tempSlots: teamPreference === 'Create a Team' ? (Number(slots) || 1) : 1,
-      foodPreference: foodPreference || 'Veg',
-      tshirtSize: tshirtSize || 'M',
-      role: 'participant',
-      paymentStatus: 'pending',
-      amountPaid: 0,
-      checkedIn: false,
-      profileCompleted: true, // normal signup is completed immediately
-      createdAt: new Date().toISOString()
-    });
+    // Return OTP verification success without creating user in database yet
+    return res.json({ success: true, message: 'OTP verified successfully. Proceed to payment.' });
   }
 
   if (!user) {
-    return res.status(500).json({ message: 'Failed to create or retrieve user.' });
+    return res.status(500).json({ message: 'Failed to retrieve user.' });
   }
 
   const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -663,6 +609,324 @@ router.post('/coupons/validate', async (req: Request, res: Response) => {
 
 // --- PAYMENTS & REGISTRATION MOCKS ---
 
+// --- PAYMENTS & REGISTRATION ---
+
+// 0.1 Create Order Public (For signup registration before user is created in DB)
+router.post('/payments/create-order-public', async (req: Request, res: Response) => {
+  const { registrationType, quantity, couponCode } = req.body;
+  const count = Number(quantity) || 1;
+  let expectedAmount = count * 399;
+
+  try {
+    if (couponCode) {
+      const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+      if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+        let discountAmount = 0;
+        if (coupon.discountType === 'percentage') {
+          discountAmount = (expectedAmount * coupon.discountValue) / 100;
+        } else {
+          discountAmount = coupon.discountValue;
+        }
+        expectedAmount = Math.max(0, expectedAmount - discountAmount);
+      }
+    }
+
+    const keyId = process.env.RAZORPAY_KEY_ID || process.env.key_id;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
+
+    if (!keyId || !keySecret) {
+      console.log('[Payment] Razorpay credentials missing, returning mock order for bypass testing');
+      return res.json({
+        id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
+        currency: 'INR',
+        amount: expectedAmount * 100,
+        keyId: 'mock_key_id'
+      });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: Math.round(expectedAmount * 100), // in paise
+      currency: 'INR',
+      receipt: `receipt_${uuidv4().substring(0, 14)}`
+    });
+
+    return res.json({
+      id: order.id,
+      currency: order.currency,
+      amount: order.amount,
+      keyId: keyId,
+    });
+  } catch (error: any) {
+    console.error('Error creating Razorpay order:', error);
+    return res.json({
+      id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
+      currency: 'INR',
+      amount: expectedAmount * 100,
+      keyId: 'mock_key_id'
+    });
+  }
+});
+
+// 0.2 Verify and Register (Verify signature and create user/team record in paid state directly)
+router.post('/payments/verify-and-register', async (req: Request, res: Response) => {
+  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, registrationType, registrationDetails, couponCode, amount } = req.body;
+
+  if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !registrationType || !registrationDetails) {
+    return res.status(400).json({ message: 'Missing required parameters' });
+  }
+
+  // Verify Razorpay signature
+  if (razorpay_signature !== 'mock_payment_signature') {
+    const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
+    if (!keySecret) {
+      return res.status(500).json({ message: 'Razorpay secret key is not configured on the backend' });
+    }
+
+    const generated_signature = crypto
+      .createHmac('sha256', keySecret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    if (generated_signature !== razorpay_signature) {
+      return res.status(400).json({ message: 'Payment verification failed: Signature mismatch' });
+    }
+  }
+
+  try {
+    if (registrationType === 'TEAM') {
+      const { teamName, teamCode, leader, members, teamStatus, availableSlots } = registrationDetails;
+
+      const cleanTeamName = String(teamName).trim();
+      const cleanTeamCode = String(teamCode).trim();
+      const totalMembersCount = 1 + members.length;
+
+      // Uniqueness checks
+      const allEmails = [leader.email, ...members.map((m: any) => m.email)].map(e => String(e).trim().toLowerCase());
+      for (const email of allEmails) {
+        const existingUser = await Users.findOne({ email });
+        if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered.` });
+      }
+
+      const allRolls = [leader.rollNumber, ...members.map((m: any) => m.rollNumber)].map(r => String(r).trim().toUpperCase());
+      for (const roll of allRolls) {
+        if (roll) {
+          const existingRoll = await Users.findOne({ rollNumber: roll });
+          if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${roll} is already registered.` });
+        }
+      }
+
+      const allPhones = [leader.phone, ...members.map((m: any) => m.phone)].map(p => String(p).trim());
+      for (const phone of allPhones) {
+        const existingPhone = await Users.findOne({ phone });
+        if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
+      }
+
+      const existingName = await Teams.findOne(t => t.name.toLowerCase() === cleanTeamName.toLowerCase());
+      if (existingName) return res.status(400).json({ message: 'Team Name is already taken.' });
+
+      let finalTeamCode = cleanTeamCode;
+      const existingCode = await Teams.findOne(t => t.id.toLowerCase() === cleanTeamCode.toLowerCase());
+      if (existingCode) {
+        finalTeamCode = await generateTeamId();
+      }
+
+      // Create leader
+      const leaderUser = await Users.create({
+        id: `u_${Math.random().toString(36).substring(2, 9)}`,
+        name: leader.name,
+        email: leader.email.toLowerCase(),
+        phone: leader.phone,
+        college: leader.college,
+        rollNumber: leader.rollNumber,
+        branch: leader.branch,
+        year: leader.year,
+        gender: leader.gender,
+        tshirtSize: leader.tshirtSize || 'M',
+        linkedin: leader.linkedin || '',
+        role: 'team-leader',
+        paymentStatus: 'paid',
+        paymentId: razorpay_payment_id,
+        amountPaid: 399,
+        checkedIn: false,
+        profileCompleted: true,
+        registrationType: 'TEAM',
+        teamId: finalTeamCode,
+        teamRole: 'leader',
+        couponUsed: couponCode || undefined,
+        createdAt: new Date().toISOString()
+      });
+
+      // Create members
+      const memberIds: string[] = [];
+      for (const m of members) {
+        const mId = `u_${Math.random().toString(36).substring(2, 9)}`;
+        await Users.create({
+          id: mId,
+          name: m.name,
+          email: m.email.toLowerCase(),
+          phone: m.phone || leader.phone,
+          college: m.college || leader.college,
+          rollNumber: m.rollNumber,
+          branch: m.branch,
+          year: m.year,
+          gender: m.gender,
+          tshirtSize: m.tshirtSize || 'M',
+          linkedin: m.linkedin || '',
+          role: 'participant',
+          paymentStatus: 'paid',
+          paymentId: razorpay_payment_id,
+          amountPaid: 399,
+          checkedIn: false,
+          profileCompleted: true,
+          registrationType: 'TEAM',
+          teamId: finalTeamCode,
+          teamRole: 'member',
+          couponUsed: couponCode || undefined,
+          createdAt: new Date().toISOString()
+        });
+        memberIds.push(mId);
+      }
+
+      // Create team
+      const allTeamMembers = [leaderUser.id, ...memberIds];
+      const team = await Teams.create({
+        id: finalTeamCode,
+        name: cleanTeamName,
+        description: 'Created during team registration.',
+        college: leader.college,
+        leaderId: leaderUser.id,
+        members: allTeamMembers,
+        memberCount: allTeamMembers.length,
+        remainingSlots: 5 - allTeamMembers.length,
+        paidSlots: allTeamMembers.length,
+        availableSlots: teamStatus === 'OPEN' ? (Number(availableSlots) || 0) : 0,
+        teamStatus: teamStatus === 'OPEN' ? 'OPEN' : 'CLOSED',
+        status: allTeamMembers.length >= 5 ? 'full' : 'open',
+        inviteLink: `${FRONTEND_BASE_URL}/teams/join?teamId=${finalTeamCode}`,
+        joinRequests: [],
+        paymentStatus: 'paid',
+        createdAt: new Date().toISOString()
+      });
+
+      // Log payment
+      await Payments.create({
+        razorpayPaymentId: razorpay_payment_id,
+        razorpayOrderId: razorpay_order_id,
+        userId: leaderUser.id,
+        userName: leaderUser.name,
+        userEmail: leaderUser.email,
+        amount: amount || (totalMembersCount * 399),
+        status: 'success',
+        couponUsed: couponCode,
+        createdAt: new Date().toISOString()
+      });
+
+      if (couponCode) {
+        const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+        if (coupon) {
+          await Coupons.updateOne(coupon.id, { usageCount: coupon.usageCount + 1 });
+        }
+      }
+
+      // Send confirmation emails
+      try {
+        await transporter.sendMail({
+          from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+          to: leaderUser.email,
+          subject: 'Team Registration Confirmed - CodeSprint 2026',
+          html: `<p>Dear <strong>${leaderUser.name}</strong>,</p><p>Your team <strong>${team.name}</strong> has been registered successfully!</p>`
+        });
+      } catch (e) {
+        console.error('Leader email send error:', e);
+      }
+
+      const token = jwt.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+      return res.json({ success: true, token, user: leaderUser, team });
+
+    } else {
+      // INDIVIDUAL
+      const { name, email, phone, rollNumber, college, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, foodPreference, tshirtSize } = registrationDetails;
+
+      const existingUser = await Users.findOne({ email: email.toLowerCase() });
+      if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered.` });
+
+      const existingPhone = await Users.findOne({ phone });
+      if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
+
+      if (rollNumber) {
+        const existingRoll = await Users.findOne({ rollNumber });
+        if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
+      }
+
+      const user = await Users.create({
+        id: `u_${Math.random().toString(36).substring(2, 9)}`,
+        name,
+        email: email.toLowerCase(),
+        phone,
+        college,
+        rollNumber,
+        branch,
+        year,
+        gender,
+        linkedin,
+        portfolio,
+        teamPreference,
+        tempTeamName: teamPreference === 'Create a Team' ? teamName : undefined,
+        tempTeamCode: teamPreference === 'Join a Team' ? teamCode : undefined,
+        tempSlots: 1,
+        foodPreference: foodPreference || 'Veg',
+        tshirtSize: tshirtSize || 'M',
+        role: 'participant',
+        paymentStatus: 'paid',
+        paymentId: razorpay_payment_id,
+        amountPaid: amount || 399,
+        checkedIn: false,
+        profileCompleted: true,
+        registrationType: 'INDIVIDUAL',
+        createdAt: new Date().toISOString()
+      });
+
+      await processUserTeamPreference(user.id);
+
+      await Payments.create({
+        razorpayPaymentId: razorpay_payment_id,
+        razorpayOrderId: razorpay_order_id,
+        userId: user.id,
+        userName: user.name,
+        userEmail: user.email,
+        amount: amount || 399,
+        status: 'success',
+        couponUsed: couponCode,
+        createdAt: new Date().toISOString()
+      });
+
+      if (couponCode) {
+        const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+        if (coupon) {
+          await Coupons.updateOne(coupon.id, { usageCount: coupon.usageCount + 1 });
+        }
+      }
+
+      try {
+        await transporter.sendMail({
+          from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+          to: user.email,
+          subject: 'Registration Confirmed - CodeSprint 2026',
+          html: `<p>Dear <strong>${user.name}</strong>,</p><p>Your registration for CodeSprint 2026 has been confirmed successfully!</p>`
+        });
+      } catch (e) {
+        console.error('User email send error:', e);
+      }
+
+      const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+      return res.json({ success: true, token, user });
+    }
+  } catch (error: any) {
+    console.error('Registration processing error:', error);
+    return res.status(500).json({ message: error.message || 'Server error during verification & registration.' });
+  }
+});
+
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', authenticateToken, async (req: AuthRequest, res: Response) => {
   let expectedAmount = 399;
@@ -672,7 +936,9 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       if (user.role === 'team-leader' && user.teamId) {
         const team = await Teams.findOne({ id: user.teamId });
         if (team) {
-          expectedAmount = team.members.length * 399;
+          // Calculate amount only for members who have NOT paid yet
+          const unpaidMembers = await Users.find(u => u.teamId === team.id && u.paymentStatus !== 'paid');
+          expectedAmount = unpaidMembers.length * 399;
         }
       } else {
         expectedAmount = 399;
@@ -694,8 +960,8 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       }
     }
 
-    const keyId = process.env.key_id;
-    const keySecret = process.env.key_secret;
+    const keyId = process.env.RAZORPAY_KEY_ID || process.env.key_id;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
 
     if (!keyId || !keySecret) {
       console.log('[Payment] Razorpay credentials missing, returning mock order for bypass testing');
@@ -703,46 +969,29 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
         id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
         currency: 'INR',
         amount: expectedAmount * 100,
+        keyId: 'mock_key_id'
       });
     }
 
-    const response = await fetch('https://api.razorpay.com/v1/orders', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64')
-      },
-      body: JSON.stringify({
-        amount: Math.round(expectedAmount * 100), // Razorpay works in paise
-        currency: 'INR',
-        receipt: `receipt_${uuidv4().substring(0, 14)}`
-      })
+    const order = await razorpay.orders.create({
+      amount: Math.round(expectedAmount * 100), // in paise
+      currency: 'INR',
+      receipt: `receipt_${uuidv4().substring(0, 14)}`
     });
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error('Razorpay order creation error:', errorData);
-      // Fallback to mock order on API error to prevent 500 block during client testing
-      console.log('[Payment] Razorpay API error, falling back to mock order for testing');
-      return res.json({
-        id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
-        currency: 'INR',
-        amount: expectedAmount * 100,
-      });
-    }
-
-    const order: any = await response.json();
     return res.json({
       id: order.id,
       currency: order.currency,
       amount: order.amount,
+      keyId: keyId,
     });
   } catch (error: any) {
-    console.error('Error creating Razorpay order, falling back to mock order:', error);
+    console.error('Error creating Razorpay order:', error);
     return res.json({
       id: `order_mock_${Math.floor(100000 + Math.random() * 900000)}`,
       currency: 'INR',
       amount: expectedAmount * 100,
+      keyId: 'mock_key_id'
     });
   }
 });
@@ -759,7 +1008,7 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
 
   // Verify Razorpay signature (allow bypass for testing/development mode)
   if (razorpay_signature !== 'mock_payment_signature') {
-    const keySecret = process.env.key_secret;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
     if (!keySecret) {
       return res.status(500).json({ message: 'Razorpay secret key is not configured on the backend' });
     }
@@ -890,126 +1139,6 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   return res.json({ success: true, message: 'Payment completed successfully', user: updatedUser });
 });
 
-// 3. Submit UTR for Manual Payment Verification
-router.post('/payments/submit-utr', authenticateToken, async (req: AuthRequest, res: Response) => {
-  const { utr } = req.body;
-  const userId = req.user?.id;
-
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
-  if (!utr || typeof utr !== 'string' || !utr.trim()) {
-    return res.status(400).json({ message: 'UTR number is required' });
-  }
-
-  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
-  if (sanitizedUtr.length < 12) {
-    return res.status(400).json({ message: 'UTR number must be at least 12 characters long' });
-  }
-
-  const user = await Users.findOne({ id: userId });
-  if (!user) return res.status(404).json({ message: 'User not found' });
-
-  // Check if this UTR is already in use by any other user
-  const duplicate = await Users.findOne(u => u.utr === sanitizedUtr && u.id !== userId);
-
-  if (duplicate) {
-    // Auto-reject the user due to duplicate UTR
-    await Users.updateOne(user.id, {
-      paymentStatus: 'rejected',
-      utr: sanitizedUtr
-    });
-    
-    // Create notification
-    await Notifications.create({
-      recipientType: 'individual',
-      recipientTarget: user.id,
-      title: 'Payment Verification Rejected',
-      message: `Your payment request was automatically rejected due to duplicate UTR number.`,
-      type: 'warning',
-      readBy: [],
-      createdAt: new Date().toISOString()
-    });
-
-    const updatedUser = await Users.findOne({ id: user.id });
-    return res.status(400).json({ 
-      success: false, 
-      autoRejected: true, 
-      message: 'This UTR has already been submitted by another user. Your registration request is auto-rejected. Please submit a valid unique transaction UTR.', 
-      user: updatedUser 
-    });
-  }
-
-  // Unique UTR - set status to submitted
-  await Users.updateOne(user.id, {
-    paymentStatus: 'submitted',
-    utr: sanitizedUtr
-  });
-
-  // Send pending verification email
-  try {
-    await transporter.sendMail({
-      from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-      to: user.email,
-      subject: 'Payment Verification Pending - CodeSprint 2026',
-      html: `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-          <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #6d28d9; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">CodeSprint 2026</h1>
-            <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Audisankara University</p>
-          </div>
-          
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-            Dear <strong>${user.name}</strong>,
-          </p>
-          
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-            Thank you for registering for CodeSprint 2026 and submitting your transaction UTR.
-          </p>
-          
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-            We have successfully received your information and transaction UTR number: <strong>${sanitizedUtr}</strong>.
-          </p>
-          
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px; background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 15px; border-radius: 6px;">
-            <strong>Please Note:</strong> Our management team is currently checking your payment transaction. The verification and account activation process usually takes about <strong>8 hours</strong>.
-          </p>
-          
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
-            Once your payment has been approved, your account will be activated, and you will receive another confirmation email with instructions to log in and join the official event WhatsApp group.
-          </p>
-          
-          <div style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
-            <p style="color: #475569; font-size: 15px; line-height: 1.5; margin: 0;">
-              Warm regards,<br>
-              <strong>CodeSprint 2026 Team</strong><br>
-              Audisankara University
-            </p>
-          </div>
-        </div>
-      `
-    });
-    console.log(`[Email] Sent verification pending email to ${user.email}`);
-  } catch (err) {
-    console.error('Failed to send verification pending email:', err);
-  }
-
-  // Create notification
-  await Notifications.create({
-    recipientType: 'individual',
-    recipientTarget: user.id,
-    title: 'UTR Submitted for Verification',
-    message: `Thank you, ${user.name}! Your UTR ${sanitizedUtr} has been submitted. Management will verify and activate your account.`,
-    type: 'info',
-    readBy: [],
-    createdAt: new Date().toISOString()
-  });
-
-  const updatedUser = await Users.findOne({ id: user.id });
-  return res.json({ 
-    success: true, 
-    message: 'UTR submitted successfully. Awaiting admin verification.', 
-    user: updatedUser 
-  });
-});
 
 
 // Validation endpoint for unique team name / team code
@@ -1205,7 +1334,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       availableSlots: teamStatus === 'OPEN' ? (Number(availableSlots) || 0) : 0,
       teamStatus: teamStatus === 'OPEN' ? 'OPEN' : 'CLOSED',
       status: allTeamMembers.length >= 5 ? 'full' as const : 'open' as const,
-      inviteLink: `http://localhost:3500/teams/join?teamId=${finalTeamCode}`,
+      inviteLink: `${FRONTEND_BASE_URL}/teams/join?teamId=${finalTeamCode}`,
       joinRequests: [],
       paymentStatus: 'pending' as const,
       createdAt: new Date().toISOString()
@@ -1252,7 +1381,7 @@ router.post('/teams/create', authenticateToken, async (req: AuthRequest, res: Re
     remainingSlots: 4, // Team of max 5
     paidSlots: user.tempSlots || 1, // Store total paid slots
     status: 'open',
-    inviteLink: `http://localhost:3000/teams/join?teamId=${teamId}`,
+    inviteLink: `${FRONTEND_BASE_URL}/teams/join?teamId=${teamId}`,
     joinRequests: [],
     createdAt: new Date().toISOString()
   });
@@ -1311,7 +1440,7 @@ router.post('/teams/set-availability', authenticateToken, async (req: AuthReques
   }
 });
 
-// 1.5. Add Member directly (Team Leader Only, handles UTR payment submission)
+// 1.5. Add Member directly (Team Leader Only)
 router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res: Response) => {
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
@@ -1324,29 +1453,19 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
   const team = await Teams.findOne({ id: leader.teamId });
   if (!team) return res.status(404).json({ message: 'Team not found.' });
 
-  const { utr, members: membersArray } = req.body;
+  const { members: membersArray } = req.body;
+
+  // Calculate available prepaid slots
+  const paidMembersCount = (await Users.find({ teamId: team.id, paymentStatus: 'paid' })).length;
+  let availablePaidSlots = (team.paidSlots || 1) - paidMembersCount;
 
   // ── MULTI-MEMBER MODE (array payload from dashboard modal) ──
   if (Array.isArray(membersArray) && membersArray.length > 0) {
-    if (!utr || typeof utr !== 'string' || !utr.trim()) {
-      return res.status(400).json({ message: 'Transaction UTR is required.' });
-    }
-    const sanitizedUtr = utr.replace(/\s+/g, '').trim();
-    if (sanitizedUtr.length < 12) {
-      return res.status(400).json({ message: 'UTR number must be at least 12 characters long.' });
-    }
-
     // Capacity check
     if (team.members.length + membersArray.length > 5) {
       return res.status(400).json({
         message: `Adding ${membersArray.length} member(s) would exceed the team limit of 5. Your team currently has ${team.members.length} member(s).`
       });
-    }
-
-    // Check UTR uniqueness
-    const duplicateUtr = await Users.findOne((u: any) => u.utr === sanitizedUtr);
-    if (duplicateUtr) {
-      return res.status(400).json({ message: 'This UTR has already been submitted by another user.' });
     }
 
     const addedUsers: any[] = [];
@@ -1356,6 +1475,12 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
 
       let targetUser = await Users.findOne({ email: email.toLowerCase() });
       if (targetUser && targetUser.teamId) continue; // skip if already in a team
+
+      // Decide payment status based on prepaid slots
+      const paymentStatus = availablePaidSlots > 0 ? 'paid' : 'pending';
+      if (availablePaidSlots > 0) {
+        availablePaidSlots -= 1;
+      }
 
       if (!targetUser) {
         targetUser = await Users.create({
@@ -1372,8 +1497,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
           foodPreference: foodPreference || 'Veg',
           linkedin: '',
           role: 'participant',
-          paymentStatus: 'submitted',
-          utr: sanitizedUtr,
+          paymentStatus: paymentStatus,
           amountPaid: 0,
           checkedIn: false,
           profileCompleted: true,
@@ -1381,8 +1505,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
         });
       } else {
         await Users.updateOne(targetUser.id, {
-          paymentStatus: 'submitted',
-          utr: sanitizedUtr,
+          paymentStatus: paymentStatus,
           amountPaid: 0,
           phone: phone || targetUser.phone || leader.phone,
           college: college || targetUser.college || leader.college,
@@ -1404,8 +1527,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
 
       // Send email to each added member
       try {
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const completeLink = `${frontendUrl.split(',')[0]}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
+        const completeLink = `${FRONTEND_BASE_URL}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
         await transporter.sendMail({
           from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
           to: targetUser.email,
@@ -1414,7 +1536,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
             <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
             <p>Dear <strong>${targetUser.name}</strong>,</p>
             <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong>.</p>
-            <p>Your registration is pending admin approval.</p>
+            <p>Your registration status is: <strong>${paymentStatus === 'paid' ? 'Paid & Active' : 'Pending Payment'}</strong>.</p>
             <div style="text-align:center;margin:24px 0;">
               <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
             </div>
@@ -1433,33 +1555,25 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
     });
 
     const updatedTeam = await Teams.findOne({ id: team.id });
-    return res.json({ success: true, message: `${addedUsers.length} member(s) submitted. Awaiting admin approval.`, team: updatedTeam });
+    return res.json({ success: true, message: `${addedUsers.length} member(s) added successfully.`, team: updatedTeam });
   }
 
   // ── SINGLE MEMBER MODE (legacy / backwards compat) ──
   const { name, email, phone, rollNumber, college, branch, year, gender, tshirtSize, foodPreference } = req.body;
-  if (!name || !email || !utr) {
-    return res.status(400).json({ message: 'Name, Email, and Transaction UTR are required.' });
+  if (!name || !email) {
+    return res.status(400).json({ message: 'Name and Email are required.' });
   }
 
   if (team.members.length >= 5) {
     return res.status(400).json({ message: 'Your team already has the maximum of 5 members.' });
   }
 
-  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
-  if (sanitizedUtr.length < 12) {
-    return res.status(400).json({ message: 'UTR number must be at least 12 characters long.' });
-  }
-
-  const duplicateUtr = await Users.findOne((u: any) => u.utr === sanitizedUtr);
-  if (duplicateUtr) {
-    return res.status(400).json({ message: 'This UTR has already been submitted by another user.' });
-  }
-
   let targetUser = await Users.findOne({ email: email.toLowerCase() });
   if (targetUser && targetUser.teamId) {
     return res.status(400).json({ message: 'This user is already in a team.' });
   }
+
+  const paymentStatus = availablePaidSlots > 0 ? 'paid' : 'pending';
 
   if (!targetUser) {
     targetUser = await Users.create({
@@ -1469,13 +1583,13 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
       rollNumber: rollNumber || '', branch: branch || 'Unknown',
       year: year || '1st Year', gender: gender || 'Male',
       tshirtSize: tshirtSize || 'M', foodPreference: foodPreference || 'Veg',
-      linkedin: '', role: 'participant', paymentStatus: 'submitted',
-      utr: sanitizedUtr, amountPaid: 0, checkedIn: false,
+      linkedin: '', role: 'participant', paymentStatus: paymentStatus,
+      amountPaid: 0, checkedIn: false,
       profileCompleted: true, createdAt: new Date().toISOString()
     });
   } else {
     await Users.updateOne(targetUser.id, {
-      paymentStatus: 'submitted', utr: sanitizedUtr, amountPaid: 0,
+      paymentStatus: paymentStatus, amountPaid: 0,
       phone: phone || targetUser.phone || leader.phone,
       college: college || targetUser.college || leader.college,
       rollNumber: rollNumber || targetUser.rollNumber || '',
@@ -1500,8 +1614,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
   }
 
   try {
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const completeLink = `${frontendUrl.split(',')[0]}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
+    const completeLink = `${FRONTEND_BASE_URL}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
     await transporter.sendMail({
       from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
       to: targetUser.email,
@@ -1510,7 +1623,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
         <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
         <p>Dear <strong>${targetUser.name}</strong>,</p>
         <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong> for CodeSprint 2026.</p>
-        <p>Your registration request is pending admin verification.</p>
+        <p>Your registration status is: <strong>${paymentStatus === 'paid' ? 'Paid & Active' : 'Pending Payment'}</strong>.</p>
         <div style="text-align:center;margin:24px 0;">
           <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
         </div>
@@ -1521,56 +1634,9 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
   }
 
   const updatedTeam = await Teams.findOne({ id: team.id });
-  return res.json({ success: true, message: 'Member request submitted. Awaiting admin approval.', team: updatedTeam });
+  return res.json({ success: true, message: 'Member added successfully.', team: updatedTeam });
 });
 
-// 1b. Request Extra Team Slots (Leader only)
-router.post('/teams/request-extra-slots', authenticateToken, async (req: AuthRequest, res: Response) => {
-  const { slots, utr } = req.body;
-  const userId = req.user?.id;
-
-  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
-  if (!slots || isNaN(slots) || Number(slots) <= 0) {
-    return res.status(400).json({ message: 'Valid slot count is required.' });
-  }
-  if (!utr || typeof utr !== 'string' || !utr.trim()) {
-    return res.status(400).json({ message: 'Transaction UTR is required.' });
-  }
-
-  const user = await Users.findOne({ id: userId });
-  if (!user || !user.teamId) {
-    return res.status(400).json({ message: 'Only team members/leaders can request slots.' });
-  }
-
-  const team = await Teams.findOne({ id: user.teamId });
-  if (!team) return res.status(404).json({ message: 'Team not found.' });
-
-  if (team.leaderId !== userId) {
-    return res.status(403).json({ message: 'Only the team leader can request extra slots.' });
-  }
-
-  const requestedSlots = Number(slots);
-  const currentPaid = team.paidSlots || 1;
-
-  if (currentPaid + requestedSlots > 5) {
-    return res.status(400).json({ message: 'A team can have a maximum of 5 slots total.' });
-  }
-
-  const sanitizedUtr = utr.replace(/\s+/g, '').trim();
-  if (sanitizedUtr.length < 12) {
-    return res.status(400).json({ message: 'UTR must be at least 12 characters long.' });
-  }
-
-  // Update team with pending extra slots request
-  await Teams.updateOne(team.id, {
-    extraSlotsPending: requestedSlots,
-    extraSlotsUtr: sanitizedUtr,
-    extraSlotsStatus: 'submitted'
-  });
-
-  const updatedTeam = await Teams.findOne({ id: team.id });
-  return res.json({ success: true, message: 'Extra slots request submitted. Awaiting admin approval.', team: updatedTeam });
-});
 
 // 2. Request to Join a Team
 router.post('/teams/join-request', authenticateToken, async (req: AuthRequest, res: Response) => {
@@ -1899,7 +1965,6 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
   const submittedPayments = allUsers.filter(u => u.paymentStatus === 'submitted' && u.role !== 'admin').length;
   const rejectedPayments = allUsers.filter(u => u.paymentStatus === 'rejected' && u.role !== 'admin').length;
   const totalTeams = allTeams.length;
-  const availableSlots = 200 - paidParticipants; // e.g. Limit 200 attendees
   const checkedInCount = allUsers.filter(u => u.checkedIn && u.role !== 'admin').length;
   
   // Calculate total revenue
@@ -1936,13 +2001,13 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
     submittedPayments,
     rejectedPayments,
     totalTeams,
-    availableSlots,
     totalRevenue,
     checkedInCount,
     collegesParticipating,
     collegeDistribution: collegeCounts,
     liveRegistrationsGraph
   });
+
 });
 
 // 2. Get list of participants
@@ -2069,129 +2134,7 @@ router.post('/admin/check-in', authenticateToken, requireAdmin, async (req: Requ
   return res.json({ success: true, message: `${user.name} checked in successfully.`, user: updatedUser });
 });
 
-// 3b. Verify UTR Payment Request
-router.post('/admin/verify-utr', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-  const { userId, action } = req.body;
-  if (!userId || !action) {
-    return res.status(400).json({ message: 'User ID and Action (approve/reject) are required' });
-  }
 
-  const user = await Users.findOne({ id: userId });
-  if (!user) return res.status(404).json({ message: 'User not found' });
-
-  if (action === 'approve') {
-    const paymentId = user.utr || `utr_approved_${Math.floor(100000 + Math.random() * 900000)}`;
-    
-    // 1. Update user to paid (or cascade update for team members)
-    if (user.role === 'team-leader' && user.teamId) {
-      const team = await Teams.findOne({ id: user.teamId });
-      const totalAmount = team ? team.members.length * 399 : 399;
-      await handleTeamPaymentSuccess(user.teamId, paymentId, totalAmount);
-    } else {
-      await Users.updateOne(user.id, {
-        paymentStatus: 'paid',
-        amountPaid: 399,
-        paymentId: paymentId
-      });
-      if (user.teamId) {
-        const team = await Teams.findOne({ id: user.teamId });
-        if (team) {
-          const currentPaid = team.paidSlots || 1;
-          await Teams.updateOne(team.id, {
-            paidSlots: currentPaid + 1
-          });
-        }
-      }
-      // Process auto-team preference for individuals
-      await processUserTeamPreference(user.id);
-    }
-
-    // 2. Create notification
-    await Notifications.create({
-      recipientType: 'individual',
-      recipientTarget: user.id,
-      title: 'Payment Approved',
-      message: `Your payment was verified by admin. Your account has been activated!`,
-      type: 'success',
-      readBy: [],
-      createdAt: new Date().toISOString()
-    });
-
-    // 3. Send WhatsApp confirmation email (just like in verify)
-    try {
-      await transporter.sendMail({
-        from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-        to: user.email,
-        subject: 'Registration Confirmed - CodeSprint 2026',
-        html: `
-          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #6d28d9; margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px;">CodeSprint 2026</h1>
-              <p style="color: #64748b; font-size: 14px; margin-top: 5px;">Audisankara University</p>
-            </div>
-            
-            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              Dear <strong>${user.name}</strong>,
-            </p>
-            
-            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              Greetings from Audisankara University.
-            </p>
-            
-            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              We sincerely thank you for registering for CodeSprint 2026. Your payment of ₹399 has been verified and your account is now activated.
-            </p>
-            
-            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px;">
-              Please join the official WhatsApp group for updates:
-            </p>
-
-            <div style="background-color: #f8fafc; border-left: 4px solid #22c55e; padding: 20px; border-radius: 4px; margin-bottom: 30px;">
-              <p style="color: #0f172a; font-weight: 600; margin-top: 0; margin-bottom: 15px; font-size: 15px;">Please join in this group 👇</p>
-              <a href="https://chat.whatsapp.com/IA1BaLQ7gpu46RrbEz7mN7" style="display: inline-block; background-color: #22c55e; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 2px 4px rgba(34, 197, 94, 0.3);">
-                Join WhatsApp Group
-              </a>
-            </div>
-            
-            <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
-              You can now log in to choose your team creation preference.
-            </p>
-            
-            <div style="border-top: 1px solid #e2e8f0; padding-top: 20px;">
-              <p style="color: #475569; font-size: 15px; line-height: 1.5; margin: 0;">
-                Warm regards,<br>
-                <strong>CodeSprint 2026</strong><br>
-                Audisankara University
-              </p>
-            </div>
-          </div>
-        `
-      });
-      console.log(`[Email] Sent registration confirmation to ${user.email} after admin UTR approval.`);
-    } catch (err) {
-      console.error('Failed to send registration confirmation email after admin approval:', err);
-    }
-  } else if (action === 'reject') {
-    await Users.updateOne(user.id, {
-      paymentStatus: 'rejected'
-    });
-
-    await Notifications.create({
-      recipientType: 'individual',
-      recipientTarget: user.id,
-      title: 'Payment Verification Rejected',
-      message: `Your payment request was rejected by admin. Please contact support or resubmit UTR.`,
-      type: 'warning',
-      readBy: [],
-      createdAt: new Date().toISOString()
-    });
-  } else {
-    return res.status(400).json({ message: 'Invalid action. Must be "approve" or "reject".' });
-  }
-
-  const updatedUser = await Users.findOne({ id: user.id });
-  return res.json({ success: true, message: `Payment registration successfully ${action}d.`, user: updatedUser });
-});
 
 // 4. Coupons listing (with usage count)
 router.get('/admin/coupons', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
@@ -2255,64 +2198,7 @@ router.get('/admin/teams', authenticateToken, requireAdmin, async (req: Request,
   return res.json(enhancedTeams);
 });
 
-// 7b. Approve/Reject extra slots request for a team
-router.post('/admin/verify-extra-slots', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-  const { teamId, action } = req.body;
-  if (!teamId || !action) {
-    return res.status(400).json({ message: 'Team ID and Action (approve/reject) are required.' });
-  }
 
-  const team = await Teams.findOne({ id: teamId });
-  if (!team) return res.status(404).json({ message: 'Team not found.' });
-
-  if (action === 'approve') {
-    const extraSlots = team.extraSlotsPending || 0;
-    const newPaidSlots = (team.paidSlots || 1) + extraSlots;
-    const newRemainingSlots = newPaidSlots - team.members.length;
-
-    await Teams.updateOne(team.id, {
-      paidSlots: newPaidSlots,
-      remainingSlots: Math.max(0, newRemainingSlots),
-      extraSlotsStatus: 'approved',
-      extraSlotsPending: 0,
-      extraSlotsUtr: undefined
-    });
-
-    // Create notification for the leader
-    await Notifications.create({
-      recipientType: 'individual',
-      recipientTarget: team.leaderId,
-      title: 'Extra Slots Approved',
-      message: `Your request for +${extraSlots} extra slots has been approved by admin!`,
-      type: 'success',
-      readBy: [],
-      createdAt: new Date().toISOString()
-    });
-
-  } else if (action === 'reject') {
-    await Teams.updateOne(team.id, {
-      extraSlotsStatus: 'rejected',
-      extraSlotsPending: 0,
-      extraSlotsUtr: undefined
-    });
-
-    // Create notification for the leader
-    await Notifications.create({
-      recipientType: 'individual',
-      recipientTarget: team.leaderId,
-      title: 'Extra Slots Rejected',
-      message: `Your request for extra slots has been rejected by admin.`,
-      type: 'warning',
-      readBy: [],
-      createdAt: new Date().toISOString()
-    });
-  } else {
-    return res.status(400).json({ message: 'Invalid action. Must be "approve" or "reject".' });
-  }
-
-  const updatedTeam = await Teams.findOne({ id: team.id });
-  return res.json({ success: true, message: `Extra slots request successfully ${action}d.`, team: updatedTeam });
-});
 
 // 8. Delete a Team
 router.delete('/admin/teams/:id', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
@@ -2406,18 +2292,18 @@ router.post('/admin/notifications/send', authenticateToken, requireAdmin, async 
   return res.json({ success: true, message: `Notification Banner successfully dispatched!`, notification });
 });
 
-// 11. Export CSV Participants
+// 11. Export CSV Participants (Successful payments only)
 router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-  const users = await Users.find(u => u.role !== 'admin');
+  const users = await Users.find(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn));
   const allTeams = await Teams.find();
   const teamMap: Record<string, string> = {};
   allTeams.forEach(t => { teamMap[t.id] = t.name; });
 
-  // Create CSV format with new fields
-  const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,FoodPreference,TshirtSize,TeamName,PaymentStatus,AmountPaid,CheckedIn,RegistrationDate\n';
+  // Create CSV format with new fields (FoodPreference removed)
+  const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,CheckedIn,RegistrationDate\n';
   const rows = users.map(u => {
     const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.foodPreference || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid},"${u.checkedIn ? 'Yes' : 'No'}","${u.createdAt}"`;
+    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${u.checkedIn ? 'Yes' : 'No'}","${u.createdAt}"`;
   }).join('\n');
 
   res.setHeader('Content-Type', 'text/csv');
