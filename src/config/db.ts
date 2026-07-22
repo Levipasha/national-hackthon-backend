@@ -176,6 +176,18 @@ export interface ProblemStatement {
   createdAt: string;
 }
 
+export interface VisitorLog {
+  id: string;
+  ip: string;
+  userId?: string;
+  userEmail?: string;
+  path?: string;
+  userAgent?: string;
+  visitCount: number;
+  firstVisitedAt: string;
+  lastVisitedAt: string;
+}
+
 // ─── Shared Schema Options ────────────────────────────────────────────────────
 
 const baseOpts = { strict: false };
@@ -200,6 +212,7 @@ const TimelineModel   = makeModel('Timeline');
 const CoordinatorModel = makeModel('Coordinator');
 const CollegeModel    = makeModel('College');
 const ProblemModel    = makeModel('Problem');
+const VisitorModel    = makeModel('Visitor');
 
 // ─── Generic Collection Wrapper ───────────────────────────────────────────────
 
@@ -276,6 +289,7 @@ export const TimelineDb    = new MongoCollection<TimelineEvent>(TimelineModel);
 export const CoordinatorsDb = new MongoCollection<Coordinator>(CoordinatorModel);
 export const CollegesDb     = new MongoCollection<College>(CollegeModel);
 export const ProblemDb      = new MongoCollection<ProblemStatement>(ProblemModel);
+export const VisitorLogs    = new MongoCollection<VisitorLog>(VisitorModel);
 
 // ─── MongoDB Connection ───────────────────────────────────────────────────────
 

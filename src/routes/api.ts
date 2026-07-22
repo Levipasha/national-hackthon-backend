@@ -6,8 +6,8 @@ import nodemailer from 'nodemailer';
 import Razorpay from 'razorpay';
 import dotenv from 'dotenv';
 import { 
-  Users, Teams, Coupons, Notifications, Payments, Invites, GuestsDb, HighlightsDb, TimelineDb, CoordinatorsDb, CollegesDb, ProblemDb,
-  User, Team, Coupon, Notification, PaymentLog, TeamInvite, TimelineEvent, Coordinator, College, ProblemStatement
+  Users, Teams, Coupons, Notifications, Payments, Invites, GuestsDb, HighlightsDb, TimelineDb, CoordinatorsDb, CollegesDb, ProblemDb, VisitorLogs,
+  User, Team, Coupon, Notification, PaymentLog, TeamInvite, TimelineEvent, Coordinator, College, ProblemStatement, VisitorLog
 } from '../config/db';
 
 dotenv.config();
@@ -2049,6 +2049,7 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
   const allUsers = await Users.find();
   const allTeams = await Teams.find();
   const allPayments = await Payments.find();
+  const allVisitors = await VisitorLogs.find();
 
   const totalRegistrations = allUsers.filter(u => u.role !== 'admin').length;
   const paidParticipants = allUsers.filter(u => u.paymentStatus === 'paid' && u.role !== 'admin').length;
@@ -2058,6 +2059,13 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
   const totalTeams = allTeams.length;
   const checkedInCount = allUsers.filter(u => u.checkedIn && u.role !== 'admin').length;
   
+  // Calculate unique visitors & pageviews
+  const uniqueVisitorsCount = allVisitors.length;
+  const totalPageViews = allVisitors.reduce((sum, v) => sum + (v.visitCount || 1), 0);
+  const recentVisitorLogs = [...allVisitors]
+    .sort((a, b) => new Date(b.lastVisitedAt || 0).getTime() - new Date(a.lastVisitedAt || 0).getTime())
+    .slice(0, 50);
+
   // Calculate total revenue
   const totalRevenue = allPayments
     .filter(p => p.status === 'success')
@@ -2111,9 +2119,57 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
     checkedInCount,
     collegesParticipating,
     collegeDistribution: collegeCounts,
-    liveRegistrationsGraph
+    liveRegistrationsGraph,
+    uniqueVisitorsCount,
+    totalPageViews,
+    visitorLogs: recentVisitorLogs
   });
+});
 
+// Track Unique Visit by IP / User ID
+router.post('/track-visit', async (req: Request, res: Response) => {
+  try {
+    const rawIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+                  req.socket.remoteAddress ||
+                  req.ip ||
+                  '127.0.0.1';
+    
+    // Normalize client IP address
+    const clientIp = rawIp.replace(/^::ffff:/, '');
+
+    const { userId, userEmail, path, userAgent } = req.body || {};
+    const now = new Date().toISOString();
+
+    // Find existing visitor by IP address or User ID
+    let visitor = await VisitorLogs.findOne(v => v.ip === clientIp || (Boolean(userId) && v.userId === userId));
+
+    if (visitor) {
+      await VisitorLogs.updateOne(visitor.id, {
+        visitCount: (visitor.visitCount || 1) + 1,
+        lastVisitedAt: now,
+        path: path || visitor.path,
+        userAgent: userAgent || visitor.userAgent,
+        userId: userId || visitor.userId,
+        userEmail: userEmail || visitor.userEmail
+      });
+    } else {
+      visitor = await VisitorLogs.create({
+        ip: clientIp,
+        userId: userId || undefined,
+        userEmail: userEmail || undefined,
+        path: path || '/',
+        userAgent: userAgent || '',
+        visitCount: 1,
+        firstVisitedAt: now,
+        lastVisitedAt: now
+      });
+    }
+
+    return res.json({ success: true, visitCount: visitor.visitCount, ip: clientIp });
+  } catch (error) {
+    console.error('[Track Visit] Error:', error);
+    return res.status(500).json({ message: 'Failed to record visit' });
+  }
 });
 
 // 2. Get list of participants
