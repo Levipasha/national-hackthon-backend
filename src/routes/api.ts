@@ -21,6 +21,33 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || process.env.key_secret || ''
 });
 
+/**
+ * Normalizes college names to map typos, spacing, and casing to canonical college names
+ */
+export function normalizeCollegeName(rawName: string): string {
+  if (!rawName) return '';
+  let cleaned = rawName.trim().replace(/\s+/g, ' ');
+
+  // Common spelling typos & variations
+  cleaned = cleaned.replace(/instuite/gi, 'Institute');
+  cleaned = cleaned.replace(/instittue/gi, 'Institute');
+  cleaned = cleaned.replace(/intstitute/gi, 'Institute');
+  cleaned = cleaned.replace(/universty/gi, 'University');
+  cleaned = cleaned.replace(/univercity/gi, 'University');
+
+  // Standardize capitalization (Title Case)
+  return cleaned
+    .split(' ')
+    .map(word => {
+      const lower = word.toLowerCase();
+      if (['of', 'and', '&', 'for', 'in', 'at', 'the'].includes(lower)) {
+        return lower;
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 
 
 const transporter = nodemailer.createTransport({
@@ -478,15 +505,15 @@ router.get('/auth/me', authenticateToken, async (req: AuthRequest, res: Response
 router.get('/public/teams', async (req: Request, res: Response) => {
   const { search, college, slotsAvailable, sort } = req.query;
 
-  // Only retrieve teams that are explicitly set to OPEN (Public)
-  let allTeams = await Teams.find(t => t.teamStatus === 'OPEN');
+  // Retrieve all teams (both OPEN and CLOSED) except pending/unpaid ones
+  let allTeams = await Teams.find(t => t.paymentStatus !== 'pending');
   
   // Attach leader names and member details to the response for display
   const teamsWithLeaderDetails = await Promise.all(allTeams.map(async (t) => {
     const leader = await Users.findOne({ id: t.leaderId });
     
     // Fetch details of all members
-    const memberDetails = await Promise.all(t.members.map(async (mId) => {
+    const memberDetails = await Promise.all((t.members || []).map(async (mId) => {
       const u = await Users.findOne({ id: mId });
       return u ? { name: u.name, gender: u.gender } : null;
     }));
@@ -494,7 +521,7 @@ router.get('/public/teams', async (req: Request, res: Response) => {
     return {
       ...t,
       leaderName: leader ? leader.name : 'Unknown Leader',
-      memberCount: t.members.length,
+      memberCount: (t.members || []).length,
       membersList: memberDetails.filter(Boolean) as { name: string; gender: string; }[]
     };
   }));
@@ -519,7 +546,12 @@ router.get('/public/teams', async (req: Request, res: Response) => {
 
   // Slots available filter
   if (slotsAvailable === 'true') {
-    filtered = filtered.filter(t => t.teamStatus === 'OPEN' && t.availableSlots !== undefined && t.availableSlots > 0);
+    filtered = filtered.filter(t => 
+      t.teamStatus !== 'CLOSED' && 
+      t.status !== 'full' && 
+      t.remainingSlots > 0 && 
+      (t.availableSlots === undefined || t.availableSlots > 0)
+    );
   }
 
   // Sort
@@ -538,6 +570,61 @@ router.get('/public/colleges', async (req: Request, res: Response) => {
   const usersList = await Users.find();
   const collegesSet = new Set(usersList.map(u => u.college).filter(Boolean));
   return res.json(Array.from(collegesSet));
+});
+
+// 2b. Get List of Public Participants
+router.get('/public/participants', async (req: Request, res: Response) => {
+  try {
+    const { search, college } = req.query;
+
+    const allUsers = await Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
+    const allTeams = await Teams.find(t => t.paymentStatus !== 'pending');
+
+    const teamMap = new Map<string, string>();
+    allTeams.forEach(t => {
+      teamMap.set(t.id, t.name);
+    });
+
+    let list = allUsers.map(u => ({
+      id: u.id,
+      name: u.name,
+      college: u.college || 'N/A',
+      year: u.year || 'N/A',
+      branch: u.branch || '',
+      gender: u.gender || '',
+      role: u.role,
+      teamId: u.teamId || '',
+      teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
+      teamName: (u.teamId && teamMap.get(u.teamId)) || u.tempTeamName || 'Individual Participants'
+    }));
+
+    if (search) {
+      const term = String(search).toLowerCase();
+      list = list.filter(p =>
+        p.name.toLowerCase().includes(term) ||
+        p.college.toLowerCase().includes(term) ||
+        p.teamName.toLowerCase().includes(term)
+      );
+    }
+
+    if (college) {
+      const clg = String(college).toLowerCase();
+      list = list.filter(p => p.college.toLowerCase() === clg);
+    }
+
+    // Sort by team name then leader first, then member name
+    list.sort((a, b) => {
+      if (a.teamName !== b.teamName) return a.teamName.localeCompare(b.teamName);
+      if (a.teamRole === 'leader' && b.teamRole !== 'leader') return -1;
+      if (b.teamRole === 'leader' && a.teamRole !== 'leader') return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return res.json(list);
+  } catch (err: any) {
+    console.error('Error fetching public participants:', err);
+    return res.status(500).json({ message: 'Failed to fetch participants.' });
+  }
 });
 
 // 3. Generate a guaranteed unique team code/ID
@@ -1972,21 +2059,36 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
     .filter(p => p.status === 'success')
     .reduce((sum, p) => sum + p.amount, 0);
 
-  // College count
-  const collegesList = allUsers.map(u => u.college).filter(Boolean);
+  // College count (non-admin paid participants with normalization)
   const collegeCounts: { [key: string]: number } = {};
-  collegesList.forEach(c => {
-    collegeCounts[c] = (collegeCounts[c] || 0) + 1;
-  });
+  allUsers
+    .filter(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn))
+    .forEach(u => {
+      if (u.college) {
+        const canonical = normalizeCollegeName(u.college);
+        collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+      }
+    });
 
   const collegesParticipating = Object.keys(collegeCounts).length;
 
-  // Chart data simulation (Group by date)
+  // Daily registration chart data (Group by date over last 7 days + registration dates)
   const registrationsByDate: { [key: string]: number } = {};
+  
+  // Pre-fill past 7 days with 0 count
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const dateKey = d.toISOString().split('T')[0];
+    registrationsByDate[dateKey] = 0;
+  }
+
   allUsers.forEach(u => {
     if (u.role === 'admin') return;
     const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
-    registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
+    if (dateStr !== 'Unknown') {
+      registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
+    }
   });
 
   const liveRegistrationsGraph = Object.keys(registrationsByDate).map(date => ({
@@ -2292,23 +2394,68 @@ router.post('/admin/notifications/send', authenticateToken, requireAdmin, async 
   return res.json({ success: true, message: `Notification Banner successfully dispatched!`, notification });
 });
 
-// 11. Export CSV Participants (Successful payments only)
+// 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Participant Ledger)
 router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
   const users = await Users.find(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn));
   const allTeams = await Teams.find();
   const teamMap: Record<string, string> = {};
   allTeams.forEach(t => { teamMap[t.id] = t.name; });
 
-  // Create CSV format with new fields (FoodPreference removed)
-  const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,CheckedIn,RegistrationDate\n';
-  const rows = users.map(u => {
+  // 1. Day-by-day registrations breakdown
+  const registrationsByDate: Record<string, number> = {};
+  users.forEach(u => {
+    const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
+    if (dateStr !== 'Unknown') {
+      registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
+    }
+  });
+  const dateRows = Object.keys(registrationsByDate)
+    .sort((a, b) => a.localeCompare(b))
+    .map(date => `"${date}",${registrationsByDate[date]}`)
+    .join('\n');
+
+  // 2. College-wise distribution breakdown (with normalization)
+  const collegeCounts: Record<string, number> = {};
+  users.forEach(u => {
+    if (u.college) {
+      const canonical = normalizeCollegeName(u.college);
+      collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+    }
+  });
+  const collegeRows = Object.keys(collegeCounts)
+    .sort((a, b) => collegeCounts[b] - collegeCounts[a])
+    .map(clg => `"${clg}",${collegeCounts[clg]}`)
+    .join('\n');
+
+  // 3. Participant Registration records
+  const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,RegistrationDate\n';
+  const participantRows = users.map(u => {
     const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${u.checkedIn ? 'Yes' : 'No'}","${u.createdAt}"`;
+    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"http://localhost:3000","${u.createdAt}"`;
   }).join('\n');
 
+  const csvContent = 
+`================================================================================
+CODESPRINT 2026 — COMPREHENSIVE REGISTRATION & ANALYTICS REPORT
+Generated On: ${new Date().toISOString()}
+Total Registrations: ${users.length}
+================================================================================
+
+=== SECTION 1: DAY-BY-DAY REGISTRATIONS BREAKDOWN ===
+Date,Registered Students Count
+${dateRows || 'No records'}
+
+=== SECTION 2: COLLEGE-WISE REGISTRATION DISTRIBUTION ===
+College Name,Student Count
+${collegeRows || 'No records'}
+
+=== SECTION 3: ALL PARTICIPANT REGISTRATION RECORDS ===
+${headers}${participantRows}
+`;
+
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename=registrations_report.csv');
-  return res.send(headers + rows);
+  res.setHeader('Content-Disposition', 'attachment; filename=codesprint_registrations_analytics_report.csv');
+  return res.send(csvContent);
 });
 
 
