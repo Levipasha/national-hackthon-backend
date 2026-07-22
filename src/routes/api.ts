@@ -567,9 +567,13 @@ router.get('/public/teams', async (req: Request, res: Response) => {
 
 // 2. Get distinct college names that are participating
 router.get('/public/colleges', async (req: Request, res: Response) => {
-  const usersList = await Users.find();
-  const collegesSet = new Set(usersList.map(u => u.college).filter(Boolean));
-  return res.json(Array.from(collegesSet));
+  const usersList = await Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
+  const collegesSet = new Set(
+    usersList
+      .map(u => (u.college ? u.college.trim() : ''))
+      .filter(c => c && c.toLowerCase() !== 'codesprint core' && c.toLowerCase() !== 'n/a')
+  );
+  return res.json(Array.from(collegesSet).sort());
 });
 
 // 2b. Get List of Public Participants
