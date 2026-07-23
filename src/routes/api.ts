@@ -753,23 +753,24 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
   const count = Number(quantity) || 1;
   let expectedAmount = count * 399;
 
-  const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-  if (email && VIP_FREE_EMAILS.includes(String(email).trim().toLowerCase())) {
-    expectedAmount = 0;
-  } else if (couponCode && (couponCode.toUpperCase() === 'FREE100' || couponCode.toUpperCase() === 'VIPFREE')) {
-    expectedAmount = 0;
-  } else if (couponCode) {
-    const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
-    if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
-      let discountAmount = 0;
-      if (coupon.discountType === 'percentage') {
-        discountAmount = (expectedAmount * coupon.discountValue) / 100;
-      } else {
-        discountAmount = coupon.discountValue;
+  try {
+    const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
+    if (email && VIP_FREE_EMAILS.includes(String(email).trim().toLowerCase())) {
+      expectedAmount = 0;
+    } else if (couponCode && (couponCode.toUpperCase() === 'FREE100' || couponCode.toUpperCase() === 'VIPFREE')) {
+      expectedAmount = 0;
+    } else if (couponCode) {
+      const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+      if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+        let discountAmount = 0;
+        if (coupon.discountType === 'percentage') {
+          discountAmount = (expectedAmount * coupon.discountValue) / 100;
+        } else {
+          discountAmount = coupon.discountValue;
+        }
+        expectedAmount = Math.max(0, expectedAmount - discountAmount);
       }
-      expectedAmount = Math.max(0, expectedAmount - discountAmount);
     }
-  }
 
     const keyId = process.env.RAZORPAY_KEY_ID || process.env.key_id;
     const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
