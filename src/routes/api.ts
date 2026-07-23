@@ -881,9 +881,9 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         finalTeamCode = await generateTeamId();
       }
 
-      // Create leader
-      const leaderUser = await Users.create({
-        id: `u_${Math.random().toString(36).substring(2, 9)}`,
+      // Create or update leader
+      let leaderUser = await Users.findOne({ email: leader.email.toLowerCase() });
+      const leaderData = {
         name: leader.name,
         email: leader.email.toLowerCase(),
         phone: leader.phone,
@@ -894,25 +894,38 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         gender: leader.gender,
         tshirtSize: leader.tshirtSize || 'M',
         linkedin: leader.linkedin || '',
-        role: 'team-leader',
-        paymentStatus: 'paid',
+        role: 'team-leader' as const,
+        paymentStatus: 'paid' as const,
         paymentId: razorpay_payment_id,
         amountPaid: 399,
         checkedIn: false,
         profileCompleted: true,
-        registrationType: 'TEAM',
+        registrationType: 'TEAM' as const,
         teamId: finalTeamCode,
-        teamRole: 'leader',
-        couponUsed: couponCode || undefined,
-        createdAt: new Date().toISOString()
-      });
+        teamRole: 'leader' as const,
+        couponUsed: couponCode || undefined
+      };
 
-      // Create members
+      if (leaderUser) {
+        await Users.updateOne(leaderUser.id, leaderData);
+        leaderUser = await Users.findOne({ id: leaderUser.id });
+      } else {
+        leaderUser = await Users.create({
+          id: `u_${Math.random().toString(36).substring(2, 9)}`,
+          ...leaderData,
+          createdAt: new Date().toISOString()
+        });
+      }
+
+      if (!leaderUser) {
+        return res.status(500).json({ message: 'Failed to save leader user record.' });
+      }
+
+      // Create or update members
       const memberIds: string[] = [];
       for (const m of members) {
-        const mId = `u_${Math.random().toString(36).substring(2, 9)}`;
-        await Users.create({
-          id: mId,
+        let memberUser = await Users.findOne({ email: m.email.toLowerCase() });
+        const memberData = {
           name: m.name,
           email: m.email.toLowerCase(),
           phone: m.phone || leader.phone,
@@ -923,19 +936,30 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
           gender: m.gender,
           tshirtSize: m.tshirtSize || 'M',
           linkedin: m.linkedin || '',
-          role: 'participant',
-          paymentStatus: 'paid',
+          role: 'participant' as const,
+          paymentStatus: 'paid' as const,
           paymentId: razorpay_payment_id,
           amountPaid: 399,
           checkedIn: false,
           profileCompleted: true,
-          registrationType: 'TEAM',
+          registrationType: 'TEAM' as const,
           teamId: finalTeamCode,
-          teamRole: 'member',
-          couponUsed: couponCode || undefined,
-          createdAt: new Date().toISOString()
-        });
-        memberIds.push(mId);
+          teamRole: 'member' as const,
+          couponUsed: couponCode || undefined
+        };
+
+        if (memberUser) {
+          await Users.updateOne(memberUser.id, memberData);
+          memberIds.push(memberUser.id);
+        } else {
+          const mId = `u_${Math.random().toString(36).substring(2, 9)}`;
+          await Users.create({
+            id: mId,
+            ...memberData,
+            createdAt: new Date().toISOString()
+          });
+          memberIds.push(mId);
+        }
       }
 
       // Create team
@@ -1009,8 +1033,8 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
       }
 
-      const user = await Users.create({
-        id: `u_${Math.random().toString(36).substring(2, 9)}`,
+      let existingRecord = await Users.findOne({ email: email.toLowerCase() });
+      const individualData = {
         name,
         email: email.toLowerCase(),
         phone,
@@ -1027,15 +1051,26 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         tempSlots: 1,
         foodPreference: foodPreference || 'Veg',
         tshirtSize: tshirtSize || 'M',
-        role: 'participant',
-        paymentStatus: 'paid',
+        role: 'participant' as const,
+        paymentStatus: 'paid' as const,
         paymentId: razorpay_payment_id,
         amountPaid: amount || 399,
         checkedIn: false,
         profileCompleted: true,
-        registrationType: 'INDIVIDUAL',
-        createdAt: new Date().toISOString()
-      });
+        registrationType: 'INDIVIDUAL' as const
+      };
+
+      let user: any;
+      if (existingRecord) {
+        await Users.updateOne(existingRecord.id, individualData);
+        user = await Users.findOne({ id: existingRecord.id });
+      } else {
+        user = await Users.create({
+          id: `u_${Math.random().toString(36).substring(2, 9)}`,
+          ...individualData,
+          createdAt: new Date().toISOString()
+        });
+      }
 
       await processUserTeamPreference(user.id);
 

@@ -767,9 +767,9 @@ router.post('/payments/verify-and-register', async (req, res) => {
             if (existingCode) {
                 finalTeamCode = await generateTeamId();
             }
-            // Create leader
-            const leaderUser = await db_1.Users.create({
-                id: `u_${Math.random().toString(36).substring(2, 9)}`,
+            // Create or update leader
+            let leaderUser = await db_1.Users.findOne({ email: leader.email.toLowerCase() });
+            const leaderData = {
                 name: leader.name,
                 email: leader.email.toLowerCase(),
                 phone: leader.phone,
@@ -789,15 +789,27 @@ router.post('/payments/verify-and-register', async (req, res) => {
                 registrationType: 'TEAM',
                 teamId: finalTeamCode,
                 teamRole: 'leader',
-                couponUsed: couponCode || undefined,
-                createdAt: new Date().toISOString()
-            });
-            // Create members
+                couponUsed: couponCode || undefined
+            };
+            if (leaderUser) {
+                await db_1.Users.updateOne(leaderUser.id, leaderData);
+                leaderUser = await db_1.Users.findOne({ id: leaderUser.id });
+            }
+            else {
+                leaderUser = await db_1.Users.create({
+                    id: `u_${Math.random().toString(36).substring(2, 9)}`,
+                    ...leaderData,
+                    createdAt: new Date().toISOString()
+                });
+            }
+            if (!leaderUser) {
+                return res.status(500).json({ message: 'Failed to save leader user record.' });
+            }
+            // Create or update members
             const memberIds = [];
             for (const m of members) {
-                const mId = `u_${Math.random().toString(36).substring(2, 9)}`;
-                await db_1.Users.create({
-                    id: mId,
+                let memberUser = await db_1.Users.findOne({ email: m.email.toLowerCase() });
+                const memberData = {
                     name: m.name,
                     email: m.email.toLowerCase(),
                     phone: m.phone || leader.phone,
@@ -817,10 +829,21 @@ router.post('/payments/verify-and-register', async (req, res) => {
                     registrationType: 'TEAM',
                     teamId: finalTeamCode,
                     teamRole: 'member',
-                    couponUsed: couponCode || undefined,
-                    createdAt: new Date().toISOString()
-                });
-                memberIds.push(mId);
+                    couponUsed: couponCode || undefined
+                };
+                if (memberUser) {
+                    await db_1.Users.updateOne(memberUser.id, memberData);
+                    memberIds.push(memberUser.id);
+                }
+                else {
+                    const mId = `u_${Math.random().toString(36).substring(2, 9)}`;
+                    await db_1.Users.create({
+                        id: mId,
+                        ...memberData,
+                        createdAt: new Date().toISOString()
+                    });
+                    memberIds.push(mId);
+                }
             }
             // Create team
             const allTeamMembers = [leaderUser.id, ...memberIds];
@@ -889,8 +912,8 @@ router.post('/payments/verify-and-register', async (req, res) => {
                 if (existingRoll)
                     return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
             }
-            const user = await db_1.Users.create({
-                id: `u_${Math.random().toString(36).substring(2, 9)}`,
+            let existingRecord = await db_1.Users.findOne({ email: email.toLowerCase() });
+            const individualData = {
                 name,
                 email: email.toLowerCase(),
                 phone,
@@ -913,9 +936,20 @@ router.post('/payments/verify-and-register', async (req, res) => {
                 amountPaid: amount || 399,
                 checkedIn: false,
                 profileCompleted: true,
-                registrationType: 'INDIVIDUAL',
-                createdAt: new Date().toISOString()
-            });
+                registrationType: 'INDIVIDUAL'
+            };
+            let user;
+            if (existingRecord) {
+                await db_1.Users.updateOne(existingRecord.id, individualData);
+                user = await db_1.Users.findOne({ id: existingRecord.id });
+            }
+            else {
+                user = await db_1.Users.create({
+                    id: `u_${Math.random().toString(36).substring(2, 9)}`,
+                    ...individualData,
+                    createdAt: new Date().toISOString()
+                });
+            }
             await processUserTeamPreference(user.id);
             await db_1.Payments.create({
                 razorpayPaymentId: razorpay_payment_id,
