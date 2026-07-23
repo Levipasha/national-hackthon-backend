@@ -797,6 +797,15 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
     const keyId = process.env.RAZORPAY_KEY_ID || process.env.key_id;
     const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
 
+    if (expectedAmount <= 0) {
+      return res.json({
+        id: `order_free_${Math.floor(100000 + Math.random() * 900000)}`,
+        currency: 'INR',
+        amount: 0,
+        keyId: keyId || 'mock_key_id'
+      });
+    }
+
     if (!keyId || !keySecret) {
       console.log('[Payment] Razorpay credentials missing, returning mock order for bypass testing');
       return res.json({
