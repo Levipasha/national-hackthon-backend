@@ -749,9 +749,9 @@ router.post('/coupons/validate', async (req: Request, res: Response) => {
 
 // 0.1 Create Order Public (For signup registration before user is created in DB)
 router.post('/payments/create-order-public', async (req: Request, res: Response) => {
-  const { registrationType, quantity, couponCode, email } = req.body;
+  const { registrationType, quantity, couponCode, email, amount } = req.body;
   const count = Number(quantity) || 1;
-  let expectedAmount = count * 399;
+  let expectedAmount = (amount !== undefined && !isNaN(Number(amount))) ? Number(amount) : count * 399;
 
   try {
     const ONE_TIME_FREE_EMAILS = ['athoshith1@gmail.com'];
