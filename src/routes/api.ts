@@ -754,21 +754,43 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
   let expectedAmount = count * 399;
 
   try {
+    const ONE_TIME_FREE_EMAILS = ['athoshith1@gmail.com'];
     const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-    if (email && VIP_FREE_EMAILS.includes(String(email).trim().toLowerCase())) {
+
+    const emailList: string[] = Array.isArray(req.body.emails)
+      ? req.body.emails
+      : [req.body.email, ...(req.body.memberEmails || [])].filter(Boolean);
+
+    const hasVipFree = emailList.some(e => VIP_FREE_EMAILS.includes(String(e).trim().toLowerCase()));
+
+    if (hasVipFree) {
       expectedAmount = 0;
     } else if (couponCode && (couponCode.toUpperCase() === 'FREE100' || couponCode.toUpperCase() === 'VIPFREE')) {
       expectedAmount = 0;
-    } else if (couponCode) {
-      const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
-      if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
-        let discountAmount = 0;
-        if (coupon.discountType === 'percentage') {
-          discountAmount = (expectedAmount * coupon.discountValue) / 100;
-        } else {
-          discountAmount = coupon.discountValue;
+    } else {
+      // Check 1-time free email discount (e.g. athoshith1@gmail.com)
+      for (const mail of emailList) {
+        const cleanMail = String(mail).trim().toLowerCase();
+        if (ONE_TIME_FREE_EMAILS.includes(cleanMail)) {
+          const alreadyUsed = await Users.findOne(u => u.email.toLowerCase() === cleanMail && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+          if (!alreadyUsed) {
+            expectedAmount = Math.max(0, expectedAmount - 399); // Waive 1 member share of ₹399
+            break;
+          }
         }
-        expectedAmount = Math.max(0, expectedAmount - discountAmount);
+      }
+
+      if (couponCode) {
+        const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+        if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+          let discountAmount = 0;
+          if (coupon.discountType === 'percentage') {
+            discountAmount = (expectedAmount * coupon.discountValue) / 100;
+          } else {
+            discountAmount = coupon.discountValue;
+          }
+          expectedAmount = Math.max(0, expectedAmount - discountAmount);
+        }
       }
     }
 
