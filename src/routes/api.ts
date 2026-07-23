@@ -2192,6 +2192,7 @@ router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request,
 
   allUsers.forEach(u => {
     if (u.role === 'admin') return;
+    if (u.paymentStatus !== 'paid' && !u.checkedIn) return;
     const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
     if (dateStr !== 'Unknown') {
       registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
