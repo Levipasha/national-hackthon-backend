@@ -104,16 +104,27 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
 };
 
 const generateTeamId = async (): Promise<string> => {
-  const allTeams = await Teams.find({});
-  let nextNum = allTeams.length + 1;
-  let teamId = `CS2026-${String(nextNum).padStart(3, '0')}`;
-  
-  let duplicate = await Teams.findOne({ id: teamId });
-  while (duplicate) {
-    nextNum += 1;
-    teamId = `CS2026-${String(nextNum).padStart(3, '0')}`;
-    duplicate = await Teams.findOne({ id: teamId });
+  let isUnique = false;
+  let teamId = '';
+  let attempts = 0;
+
+  while (!isUnique && attempts < 1000) {
+    attempts++;
+    const randomNum = Math.floor(Math.random() * 999) + 1;
+    const formattedNum = String(randomNum).padStart(3, '0');
+    teamId = `CS2026-${formattedNum}`;
+
+    const existing = await Teams.findOne({ id: teamId });
+    if (!existing) {
+      isUnique = true;
+    }
   }
+
+  if (!isUnique) {
+    const randomNum = Math.floor(Math.random() * 9000) + 1000;
+    teamId = `CS2026-${randomNum}`;
+  }
+
   return teamId;
 };
 
@@ -290,19 +301,19 @@ router.get('/users/check-duplicate', async (req: Request, res: Response) => {
   const { phone, rollNumber, email } = req.query;
   try {
     if (phone) {
-      const existingPhone = await Users.findOne({ phone: String(phone).trim() });
+      const existingPhone = await Users.findOne(u => u.phone === String(phone).trim() && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingPhone) {
         return res.status(200).json({ exists: true, type: 'phone', message: `Phone number ${phone} is already registered.` });
       }
     }
     if (rollNumber) {
-      const existingRoll = await Users.findOne({ rollNumber: String(rollNumber).trim().toUpperCase() });
+      const existingRoll = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === String(rollNumber).trim().toUpperCase() && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingRoll) {
         return res.status(200).json({ exists: true, type: 'rollNumber', message: `Roll/ID number ${rollNumber} is already registered.` });
       }
     }
     if (email) {
-      const existingEmail = await Users.findOne({ email: String(email).trim().toLowerCase() });
+      const existingEmail = await Users.findOne(u => u.email.toLowerCase() === String(email).trim().toLowerCase() && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingEmail) {
         return res.status(200).json({ exists: true, type: 'email', message: `Email address ${email} is already registered.` });
       }
@@ -458,12 +469,12 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
     let user = await Users.findOne({ email } as any);
 
     if (!user) {
-      // New user — redirect to registration with prefilled info
-      return res.status(202).json({
-        newUser: true,
+      // User is not registered in database
+      return res.status(404).json({
+        notRegistered: true,
         email,
         name,
-        message: 'Google login success: Please complete registration.',
+        message: 'Account not found. Please register first to participate in CodeSprint-2026.',
       });
     }
 
@@ -505,26 +516,48 @@ router.get('/auth/me', authenticateToken, async (req: AuthRequest, res: Response
 router.get('/public/teams', async (req: Request, res: Response) => {
   const { search, college, slotsAvailable, sort } = req.query;
 
-  // Retrieve all teams (both OPEN and CLOSED) except pending/unpaid ones
-  let allTeams = await Teams.find(t => t.paymentStatus !== 'pending');
+  // Retrieve all teams (both OPEN and CLOSED)
+  let allTeams = await Teams.find({});
   
   // Attach leader names and member details to the response for display
-  const teamsWithLeaderDetails = await Promise.all(allTeams.map(async (t) => {
-    const leader = await Users.findOne({ id: t.leaderId });
-    
+  const teamsWithLeaderDetails = (await Promise.all(allTeams.map(async (t) => {
+    let leader = await Users.findOne({ id: t.leaderId });
+    if (!leader) {
+      leader = await Users.findOne(u => u.teamId === t.id && u.role === 'team-leader');
+    }
+
+    const isTeamPaid = t.paymentStatus === 'paid' || (t.paymentStatus as any) === 'submitted';
+    const isLeaderPaid = leader && (leader.paymentStatus === 'paid' || leader.paymentStatus === 'submitted');
+    if (!isTeamPaid && !isLeaderPaid) return null;
+
     // Fetch details of all members
     const memberDetails = await Promise.all((t.members || []).map(async (mId) => {
-      const u = await Users.findOne({ id: mId });
-      return u ? { name: u.name, gender: u.gender } : null;
+      let u = await Users.findOne({ id: mId });
+      if (!u) {
+        u = await Users.findOne(usr => (usr as any)._id?.toString() === mId);
+      }
+      return (u && u.name) ? { name: u.name, gender: u.gender || 'Male' } : null;
     }));
+
+    let list = memberDetails.filter(Boolean) as { name: string; gender: string; }[];
+    if (leader && leader.name && !list.some(m => m.name === leader.name)) {
+      list = [{ name: leader.name, gender: leader.gender || 'Male' }, ...list];
+    }
+
+    const currentMemberCount = list.length;
+    const isFull = currentMemberCount >= 5;
 
     return {
       ...t,
+      leaderId: leader ? leader.id : t.leaderId,
       leaderName: leader ? leader.name : 'Unknown Leader',
-      memberCount: (t.members || []).length,
-      membersList: memberDetails.filter(Boolean) as { name: string; gender: string; }[]
+      memberCount: currentMemberCount,
+      membersList: list,
+      status: isFull ? 'full' : 'open',
+      teamStatus: isFull ? 'CLOSED' : (t.teamStatus || 'OPEN'),
+      availableSlots: Math.max(0, 5 - currentMemberCount)
     };
-  }));
+  }))).filter(Boolean) as any[];
 
   let filtered = teamsWithLeaderDetails;
 
@@ -785,31 +818,58 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
 
   try {
     if (registrationType === 'TEAM') {
-      const { teamName, teamCode, leader, members, teamStatus, availableSlots } = registrationDetails;
+      const { teamName, teamCode, leader, members } = registrationDetails;
+      if (!teamName || !teamCode || !leader || !members || !Array.isArray(members)) {
+        return res.status(400).json({ message: 'Missing required team registration details.' });
+      }
+
+      if (!leader.name || !String(leader.name).trim() || !leader.email || !String(leader.email).trim() || !leader.phone || !leader.college || !leader.branch) {
+        return res.status(400).json({ message: 'Team Leader details are incomplete.' });
+      }
 
       const cleanTeamName = String(teamName).trim();
       const cleanTeamCode = String(teamCode).trim();
       const totalMembersCount = 1 + members.length;
 
-      // Uniqueness checks
+      // Validate team size (3 to 5 total members)
+      if (totalMembersCount < 3 || totalMembersCount > 5) {
+        return res.status(400).json({ message: 'Your team must have between 3 and 5 members, including the Team Leader.' });
+      }
+
+      // Validate female participant requirement
+      const allGenders = [leader.gender, ...members.map((m: any) => m.gender)];
+      const hasFemale = allGenders.some(g => String(g || '').trim().toLowerCase() === 'female');
+      if (!hasFemale) {
+        return res.status(400).json({ message: 'At least one female participant is required in every team.' });
+      }
+
+      // Validate member details completeness
+      for (let i = 0; i < members.length; i++) {
+        const m = members[i];
+        if (!m || !m.name || !String(m.name).trim() || !m.email || !String(m.email).trim() || !m.branch) {
+          return res.status(400).json({ message: `Member #${i + 1} details are incomplete.` });
+        }
+      }
+
+      // Uniqueness checks (only block if user has a paid or submitted registration)
       const allEmails = [leader.email, ...members.map((m: any) => m.email)].map(e => String(e).trim().toLowerCase());
       for (const email of allEmails) {
-        const existingUser = await Users.findOne({ email });
-        if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered.` });
+        const existingUser = await Users.findOne(u => u.email.toLowerCase() === email && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+        if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered with a completed payment.` });
       }
 
       const allRolls = [leader.rollNumber, ...members.map((m: any) => m.rollNumber)].map(r => String(r).trim().toUpperCase());
       for (const roll of allRolls) {
         if (roll) {
-          const existingRoll = await Users.findOne({ rollNumber: roll });
-          if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${roll} is already registered.` });
+          const existingRoll = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === roll && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+          if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${roll} is already registered with a completed payment.` });
         }
       }
 
       const allPhones = [leader.phone, ...members.map((m: any) => m.phone)].map(p => String(p).trim());
       for (const phone of allPhones) {
-        const existingPhone = await Users.findOne({ phone });
-        if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
+        const existingPhone = await Users.findOne(u => u.phone === phone && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+        if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered with a completed payment.` });
       }
 
       const existingName = await Teams.findOne(t => t.name.toLowerCase() === cleanTeamName.toLowerCase());
@@ -890,8 +950,8 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         memberCount: allTeamMembers.length,
         remainingSlots: 5 - allTeamMembers.length,
         paidSlots: allTeamMembers.length,
-        availableSlots: teamStatus === 'OPEN' ? (Number(availableSlots) || 0) : 0,
-        teamStatus: teamStatus === 'OPEN' ? 'OPEN' : 'CLOSED',
+        availableSlots: Math.max(0, 5 - allTeamMembers.length),
+        teamStatus: allTeamMembers.length >= 5 ? 'CLOSED' : 'OPEN',
         status: allTeamMembers.length >= 5 ? 'full' : 'open',
         inviteLink: `${FRONTEND_BASE_URL}/teams/join?teamId=${finalTeamCode}`,
         joinRequests: [],
@@ -938,14 +998,14 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
       // INDIVIDUAL
       const { name, email, phone, rollNumber, college, branch, year, gender, linkedin, portfolio, teamPreference, teamName, teamCode, foodPreference, tshirtSize } = registrationDetails;
 
-      const existingUser = await Users.findOne({ email: email.toLowerCase() });
+      const existingUser = await Users.findOne(u => u.email.toLowerCase() === email.toLowerCase() && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered.` });
 
-      const existingPhone = await Users.findOne({ phone });
+      const existingPhone = await Users.findOne(u => u.phone === phone && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
 
       if (rollNumber) {
-        const existingRoll = await Users.findOne({ rollNumber });
+        const existingRoll = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === String(rollNumber).trim().toUpperCase() && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
         if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
       }
 
@@ -1301,9 +1361,9 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
     }
 
     for (const email of allEmails) {
-      const existingUser = await Users.findOne({ email });
+      const existingUser = await Users.findOne(u => u.email.toLowerCase() === email && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
       if (existingUser) {
-        return res.status(400).json({ message: `Email ${email} is already registered.` });
+        return res.status(400).json({ message: `Email ${email} is already registered with a completed payment.` });
       }
     }
 
@@ -1316,9 +1376,9 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
 
     for (const rollNumber of allRolls) {
       if (rollNumber) {
-        const existingRoll = await Users.findOne({ rollNumber });
+        const existingRoll = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === rollNumber && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
         if (existingRoll) {
-          return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
+          return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered with a completed payment.` });
         }
       }
     }
@@ -1332,9 +1392,9 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
 
     for (const phone of allPhones) {
       if (phone) {
-        const existingPhone = await Users.findOne({ phone });
+        const existingPhone = await Users.findOne(u => u.phone === phone && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
         if (existingPhone) {
-          return res.status(400).json({ message: `Phone number ${phone} is already registered.` });
+          return res.status(400).json({ message: `Phone number ${phone} is already registered with a completed payment.` });
         }
       }
     }
