@@ -632,7 +632,8 @@ router.get('/public/participants', async (req: Request, res: Response) => {
       role: u.role,
       teamId: u.teamId || '',
       teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
-      teamName: (u.teamId && teamMap.get(u.teamId)) || u.tempTeamName || 'Individual Participants'
+      teamName: (u.teamId && teamMap.get(u.teamId)) || u.tempTeamName || 'Individual Participants',
+      createdAt: u.createdAt
     }));
 
     if (search) {
