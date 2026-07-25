@@ -2512,7 +2512,53 @@ router.post('/admin/impersonate', authenticateToken, requireAdmin, async (req: R
   return res.json({ success: true, token });
 });
 
+// ─── Admin: Approve / Reject submitted payment (UTR or manual) ───────────────
+router.post('/admin/verify-utr', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { userId, action } = req.body; // action: 'approve' | 'reject'
+  if (!userId || !action) return res.status(400).json({ message: 'userId and action are required.' });
+  if (!['approve', 'reject'].includes(action)) return res.status(400).json({ message: 'action must be "approve" or "reject".' });
+
+  const user = await Users.findOne({ id: userId });
+  if (!user) return res.status(404).json({ message: 'User not found.' });
+
+  if (action === 'approve') {
+    if (user.teamId) {
+      // Approve payment for the whole team
+      await handleTeamPaymentSuccess(user.teamId, user.utr || 'manual-admin-approve', user.amountPaid || 399, user.id);
+    } else {
+      await Users.updateOne(user.id, { paymentStatus: 'paid' });
+    }
+
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: user.id,
+      title: 'Payment Approved',
+      message: 'Your payment has been verified and approved by the admin. You are now fully registered!',
+      type: 'success',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+
+    return res.json({ success: true, message: 'Payment approved successfully.' });
+  } else {
+    await Users.updateOne(user.id, { paymentStatus: 'rejected' });
+
+    await Notifications.create({
+      recipientType: 'individual',
+      recipientTarget: user.id,
+      title: 'Payment Rejected',
+      message: 'Your payment submission was rejected. Please re-submit your UTR or pay via Razorpay.',
+      type: 'warning',
+      readBy: [],
+      createdAt: new Date().toISOString()
+    });
+
+    return res.json({ success: true, message: 'Payment rejected.' });
+  }
+});
+
 // 3. Mark manual check-in or Scan QR code verify
+
 router.post('/admin/check-in', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ message: 'User ID is required' });
