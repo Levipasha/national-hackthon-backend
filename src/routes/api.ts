@@ -128,7 +128,7 @@ const generateTeamId = async (): Promise<string> => {
   return teamId;
 };
 
-const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, totalAmountPaid: number) => {
+const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, totalAmountPaid: number, payerId?: string) => {
   try {
     const team = await Teams.findOne({ id: teamId });
     if (!team) return;
@@ -141,17 +141,18 @@ const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, total
       paidSlots: members.length
     });
 
-    
+    const actualPayerId = payerId || team.leaderId;
+
     for (const member of members) {
-      if (member.id === team.leaderId) {
-        // Leader
+      const isPayer = member.id === actualPayerId;
+
+      if (isPayer) {
         await Users.updateOne(member.id, {
           paymentStatus: 'paid',
           paymentId: paymentId,
-          amountPaid: totalAmountPaid
+          amountPaid: (member.amountPaid || 0) + totalAmountPaid
         });
-      } else {
-        // Members
+      } else if (member.paymentStatus !== 'paid') {
         await Users.updateOne(member.id, {
           paymentStatus: 'paid',
           paymentId: paymentId,
@@ -163,13 +164,15 @@ const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, total
           recipientType: 'individual',
           recipientTarget: member.id,
           title: 'Team Registration Confirmed',
-          message: `Your team "${team.name}" registration fee has been fully paid by your leader! You are now registered.`,
+          message: `Your team "${team.name}" registration fee has been fully paid! You are now registered.`,
           type: 'success',
           readBy: [],
           createdAt: new Date().toISOString()
         });
+      }
 
-        // Send confirmation email
+      // Send confirmation email to newly paid members or the payer
+      if (member.paymentStatus !== 'paid' || isPayer) {
         try {
           await transporter.sendMail({
             from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
@@ -187,7 +190,7 @@ const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, total
                 </p>
                 
                 <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-                  Great news! Your team leader has completed the payment for your team <strong>${team.name}</strong>.
+                  Great news! The payment for your team <strong>${team.name}</strong> has been completed.
                 </p>
                 
                 <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
@@ -487,6 +490,30 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
   }
 });
 
+// 3.5. Bypass Login (for testing only)
+router.post('/auth/bypass-login', async (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
+  }
+
+  try {
+    const targetEmail = (email || '').toLowerCase().trim();
+    const user = await Users.findOne({ email: targetEmail } as any);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found in database.' });
+    }
+
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ token, user });
+
+  } catch (err) {
+    console.error('[Bypass Login] Error:', err);
+    return res.status(500).json({ message: 'Server error during bypass login.' });
+  }
+});
+
 // 4. Get Current User profile
 router.get('/auth/me', authenticateToken, async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
@@ -622,19 +649,24 @@ router.get('/public/participants', async (req: Request, res: Response) => {
       teamMap.set(t.id, t.name);
     });
 
-    let list = allUsers.map(u => ({
-      id: u.id,
-      name: u.name,
-      college: u.college || 'N/A',
-      year: u.year || 'N/A',
-      branch: u.branch || '',
-      gender: u.gender || '',
-      role: u.role,
-      teamId: u.teamId || '',
-      teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
-      teamName: (u.teamId && teamMap.get(u.teamId)) || u.tempTeamName || 'Individual Participants',
-      createdAt: u.createdAt
-    }));
+    let list = allUsers.map(u => {
+      // Only assign a team name if the user has a confirmed teamId pointing to a real team
+      const resolvedTeamName = (u.teamId && teamMap.get(u.teamId)) || 'Individual Participants';
+      return {
+        id: u.id,
+        name: u.name,
+        college: u.college || 'N/A',
+        year: u.year || 'N/A',
+        branch: u.branch || '',
+        gender: u.gender || '',
+        role: u.role,
+        teamId: u.teamId || '',
+        teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
+        teamName: resolvedTeamName,
+        createdAt: u.createdAt
+      };
+    });
+
 
     if (search) {
       const term = String(search).toLowerCase();
@@ -664,6 +696,51 @@ router.get('/public/participants', async (req: Request, res: Response) => {
     return res.status(500).json({ message: 'Failed to fetch participants.' });
   }
 });
+
+// 2c. Get Solo Participants (paid, not yet in any team)
+router.get('/public/solo-participants', async (req: Request, res: Response) => {
+  try {
+    const { search, college } = req.query;
+
+    // Only return paid users who have no teamId (solo / unpaired)
+    let list = await Users.find(u =>
+      u.paymentStatus === 'paid' &&
+      u.role !== 'admin' &&
+      !u.teamId
+    );
+
+    let mapped = list.map(u => ({
+      id: u.id,
+      name: u.name,
+      college: u.college || 'N/A',
+      year: u.year || 'N/A',
+      branch: u.branch || '',
+      gender: u.gender || 'N/A'
+    }));
+
+    if (search) {
+      const term = String(search).toLowerCase();
+      mapped = mapped.filter(p =>
+        p.name.toLowerCase().includes(term) ||
+        p.college.toLowerCase().includes(term) ||
+        p.branch.toLowerCase().includes(term)
+      );
+    }
+
+    if (college) {
+      const clg = String(college).toLowerCase();
+      mapped = mapped.filter(p => p.college.toLowerCase() === clg);
+    }
+
+    mapped.sort((a, b) => a.name.localeCompare(b.name));
+
+    return res.json(mapped);
+  } catch (err: any) {
+    console.error('Error fetching solo participants:', err);
+    return res.status(500).json({ message: 'Failed to fetch solo participants.' });
+  }
+});
+
 
 // 3. Generate a guaranteed unique team code/ID
 router.get('/public/generate-team-code', async (req: Request, res: Response) => {
@@ -951,7 +1028,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         role: 'team-leader' as const,
         paymentStatus: 'paid' as const,
         paymentId: razorpay_payment_id,
-        amountPaid: 399,
+        amountPaid: amount !== undefined ? Number(amount) : (totalMembersCount * 399),
         checkedIn: false,
         profileCompleted: true,
         registrationType: 'TEAM' as const,
@@ -993,7 +1070,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
           role: 'participant' as const,
           paymentStatus: 'paid' as const,
           paymentId: razorpay_payment_id,
-          amountPaid: 399,
+          amountPaid: 0,
           checkedIn: false,
           profileCompleted: true,
           registrationType: 'TEAM' as const,
@@ -1289,8 +1366,8 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   }
 
   // Update user profile or cascade for team
-  if (user.role === 'team-leader' && user.teamId) {
-    await handleTeamPaymentSuccess(user.teamId, paymentLog.razorpayPaymentId, amount || 399);
+  if (user.teamId) {
+    await handleTeamPaymentSuccess(user.teamId, paymentLog.razorpayPaymentId, amount || 399, user.id);
   } else {
     await Users.updateOne(user.id, {
       paymentStatus: 'paid',
@@ -2342,7 +2419,9 @@ router.get('/admin/participants', authenticateToken, requireAdmin, async (req: R
 
   const enriched = list.map(u => {
     let expectedAmount = 399;
-    if (u.role === 'team-leader' && u.teamId) {
+    if (u.paymentStatus === 'paid') {
+      expectedAmount = u.amountPaid || 0;
+    } else if (u.role === 'team-leader' && u.teamId) {
       expectedAmount = (teamMemberCountMap[u.teamId] || 1) * 399;
     } else if (u.role === 'participant' && u.teamId) {
       expectedAmount = 0;
