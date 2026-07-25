@@ -2158,7 +2158,11 @@ router.get('/teams/my-team', authenticateToken, async (req: AuthRequest, res: Re
         year: mUser?.year || '',
         checkedIn: mUser?.checkedIn || false,
         paymentStatus: mUser?.paymentStatus || 'pending',
-        profileCompleted: mUser?.profileCompleted !== false
+        profileCompleted: mUser?.profileCompleted !== false,
+        paymentId: mUser?.paymentId || '',
+        utr: mUser?.utr || '',
+        amountPaid: mUser?.amountPaid || 0,
+        createdAt: mUser?.createdAt || ''
       };
     })
   );

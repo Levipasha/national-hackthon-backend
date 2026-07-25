@@ -1917,7 +1917,11 @@ router.get('/teams/my-team', exports.authenticateToken, async (req, res) => {
             year: mUser?.year || '',
             checkedIn: mUser?.checkedIn || false,
             paymentStatus: mUser?.paymentStatus || 'pending',
-            profileCompleted: mUser?.profileCompleted !== false
+            profileCompleted: mUser?.profileCompleted !== false,
+            paymentId: mUser?.paymentId || '',
+            utr: mUser?.utr || '',
+            amountPaid: mUser?.amountPaid || 0,
+            createdAt: mUser?.createdAt || ''
         };
     }));
     // Fetch enriched join request details
