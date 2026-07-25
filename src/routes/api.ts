@@ -641,8 +641,12 @@ router.get('/public/participants', async (req: Request, res: Response) => {
   try {
     const { search, college } = req.query;
 
-    const allUsers = await Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
-    const allTeams = await Teams.find(t => t.paymentStatus !== 'pending');
+    // Include paid users AND pending users who are already in a team (added by leader)
+    const allUsers = await Users.find(u =>
+      u.role !== 'admin' &&
+      (u.paymentStatus === 'paid' || (u.paymentStatus !== 'paid' && !!u.teamId))
+    );
+    const allTeams = await Teams.find();
 
     const teamMap = new Map<string, string>();
     allTeams.forEach(t => {
