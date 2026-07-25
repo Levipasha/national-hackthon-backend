@@ -558,25 +558,31 @@ router.get('/public/colleges', async (req, res) => {
 router.get('/public/participants', async (req, res) => {
     try {
         const { search, college } = req.query;
-        const allUsers = await db_1.Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
-        const allTeams = await db_1.Teams.find(t => t.paymentStatus !== 'pending');
+        // Include paid users AND pending users who are already in a team (added by leader)
+        const allUsers = await db_1.Users.find(u => u.role !== 'admin' &&
+            (u.paymentStatus === 'paid' || !!u.teamId));
+        const allTeams = await db_1.Teams.find();
         const teamMap = new Map();
         allTeams.forEach(t => {
             teamMap.set(t.id, t.name);
         });
-        let list = allUsers.map(u => ({
-            id: u.id,
-            name: u.name,
-            college: u.college || 'N/A',
-            year: u.year || 'N/A',
-            branch: u.branch || '',
-            gender: u.gender || '',
-            role: u.role,
-            teamId: u.teamId || '',
-            teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
-            teamName: (u.teamId && teamMap.get(u.teamId)) || u.tempTeamName || 'Individual Participants',
-            createdAt: u.createdAt
-        }));
+        let list = allUsers.map(u => {
+            // Only assign a team name if the user has a confirmed teamId pointing to a real team
+            const resolvedTeamName = (u.teamId && teamMap.get(u.teamId)) || 'Individual Participants';
+            return {
+                id: u.id,
+                name: u.name,
+                college: u.college || 'N/A',
+                year: u.year || 'N/A',
+                branch: u.branch || '',
+                gender: u.gender || '',
+                role: u.role,
+                teamId: u.teamId || '',
+                teamRole: u.teamRole || (u.role === 'team-leader' ? 'leader' : 'member'),
+                teamName: resolvedTeamName,
+                createdAt: u.createdAt
+            };
+        });
         if (search) {
             const term = String(search).toLowerCase();
             list = list.filter(p => p.name.toLowerCase().includes(term) ||
@@ -602,6 +608,40 @@ router.get('/public/participants', async (req, res) => {
     catch (err) {
         console.error('Error fetching public participants:', err);
         return res.status(500).json({ message: 'Failed to fetch participants.' });
+    }
+});
+// 2c. Get Solo Participants (paid, not yet in any team)
+router.get('/public/solo-participants', async (req, res) => {
+    try {
+        const { search, college } = req.query;
+        // Only return paid users who have no teamId (solo / unpaired)
+        let list = await db_1.Users.find(u => u.paymentStatus === 'paid' &&
+            u.role !== 'admin' &&
+            !u.teamId);
+        let mapped = list.map(u => ({
+            id: u.id,
+            name: u.name,
+            college: u.college || 'N/A',
+            year: u.year || 'N/A',
+            branch: u.branch || '',
+            gender: u.gender || 'N/A'
+        }));
+        if (search) {
+            const term = String(search).toLowerCase();
+            mapped = mapped.filter(p => p.name.toLowerCase().includes(term) ||
+                p.college.toLowerCase().includes(term) ||
+                p.branch.toLowerCase().includes(term));
+        }
+        if (college) {
+            const clg = String(college).toLowerCase();
+            mapped = mapped.filter(p => p.college.toLowerCase() === clg);
+        }
+        mapped.sort((a, b) => a.name.localeCompare(b.name));
+        return res.json(mapped);
+    }
+    catch (err) {
+        console.error('Error fetching solo participants:', err);
+        return res.status(500).json({ message: 'Failed to fetch solo participants.' });
     }
 });
 // 3. Generate a guaranteed unique team code/ID
@@ -1174,6 +1214,14 @@ router.post('/payments/verify', exports.authenticateToken, async (req, res) => {
     // Update user profile or cascade for team
     if (user.teamId) {
         await handleTeamPaymentSuccess(user.teamId, paymentLog.razorpayPaymentId, amount || 399, user.id);
+        // Belt-and-suspenders: always ensure the actual payer is marked paid,
+        // even if handleTeamPaymentSuccess had an internal issue
+        await db_1.Users.updateOne(user.id, {
+            paymentStatus: 'paid',
+            paymentId: paymentLog.razorpayPaymentId,
+            couponUsed: couponCode || undefined,
+            amountPaid: (user.amountPaid || 0) + (amount || 399)
+        });
     }
     else {
         await db_1.Users.updateOne(user.id, {
@@ -1182,9 +1230,7 @@ router.post('/payments/verify', exports.authenticateToken, async (req, res) => {
             couponUsed: couponCode || undefined,
             amountPaid: amount || 399
         });
-    }
-    // Process auto-team preference (individual only, team leaders are already in a team)
-    if (user.role !== 'team-leader') {
+        // Process auto-team preference only for users not yet in a team
         await processUserTeamPreference(user.id);
     }
     // Create real-time notification
@@ -2176,6 +2222,49 @@ router.post('/admin/impersonate', exports.authenticateToken, exports.requireAdmi
     // Generate JWT token for this user
     const token = jsonwebtoken_1.default.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'codesprint-secret-key-2026', { expiresIn: '7d' });
     return res.json({ success: true, token });
+});
+// ─── Admin: Approve / Reject submitted payment (UTR or manual) ───────────────
+router.post('/admin/verify-utr', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { userId, action } = req.body; // action: 'approve' | 'reject'
+    if (!userId || !action)
+        return res.status(400).json({ message: 'userId and action are required.' });
+    if (!['approve', 'reject'].includes(action))
+        return res.status(400).json({ message: 'action must be "approve" or "reject".' });
+    const user = await db_1.Users.findOne({ id: userId });
+    if (!user)
+        return res.status(404).json({ message: 'User not found.' });
+    if (action === 'approve') {
+        if (user.teamId) {
+            // Approve payment for the whole team
+            await handleTeamPaymentSuccess(user.teamId, user.utr || 'manual-admin-approve', user.amountPaid || 399, user.id);
+        }
+        else {
+            await db_1.Users.updateOne(user.id, { paymentStatus: 'paid' });
+        }
+        await db_1.Notifications.create({
+            recipientType: 'individual',
+            recipientTarget: user.id,
+            title: 'Payment Approved',
+            message: 'Your payment has been verified and approved by the admin. You are now fully registered!',
+            type: 'success',
+            readBy: [],
+            createdAt: new Date().toISOString()
+        });
+        return res.json({ success: true, message: 'Payment approved successfully.' });
+    }
+    else {
+        await db_1.Users.updateOne(user.id, { paymentStatus: 'rejected' });
+        await db_1.Notifications.create({
+            recipientType: 'individual',
+            recipientTarget: user.id,
+            title: 'Payment Rejected',
+            message: 'Your payment submission was rejected. Please re-submit your UTR or pay via Razorpay.',
+            type: 'warning',
+            readBy: [],
+            createdAt: new Date().toISOString()
+        });
+        return res.json({ success: true, message: 'Payment rejected.' });
+    }
 });
 // 3. Mark manual check-in or Scan QR code verify
 router.post('/admin/check-in', exports.authenticateToken, exports.requireAdmin, async (req, res) => {

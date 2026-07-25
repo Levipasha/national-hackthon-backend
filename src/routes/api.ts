@@ -644,7 +644,7 @@ router.get('/public/participants', async (req: Request, res: Response) => {
     // Include paid users AND pending users who are already in a team (added by leader)
     const allUsers = await Users.find(u =>
       u.role !== 'admin' &&
-      (u.paymentStatus === 'paid' || (u.paymentStatus !== 'paid' && !!u.teamId))
+      (u.paymentStatus === 'paid' || !!u.teamId)
     );
     const allTeams = await Teams.find();
 
