@@ -1372,6 +1372,14 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   // Update user profile or cascade for team
   if (user.teamId) {
     await handleTeamPaymentSuccess(user.teamId, paymentLog.razorpayPaymentId, amount || 399, user.id);
+    // Belt-and-suspenders: always ensure the actual payer is marked paid,
+    // even if handleTeamPaymentSuccess had an internal issue
+    await Users.updateOne(user.id, {
+      paymentStatus: 'paid',
+      paymentId: paymentLog.razorpayPaymentId,
+      couponUsed: couponCode || undefined,
+      amountPaid: (user.amountPaid || 0) + (amount || 399)
+    });
   } else {
     await Users.updateOne(user.id, {
       paymentStatus: 'paid',
@@ -1379,10 +1387,7 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
       couponUsed: couponCode || undefined,
       amountPaid: amount || 399
     });
-  }
-
-  // Process auto-team preference (individual only, team leaders are already in a team)
-  if (user.role !== 'team-leader') {
+    // Process auto-team preference only for users not yet in a team
     await processUserTeamPreference(user.id);
   }
 
