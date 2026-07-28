@@ -971,13 +971,6 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         return res.status(400).json({ message: 'Your team must have between 3 and 5 members, including the Team Leader.' });
       }
 
-      // Validate female participant requirement
-      const allGenders = [leader.gender, ...members.map((m: any) => m.gender)];
-      const hasFemale = allGenders.some(g => String(g || '').trim().toLowerCase() === 'female');
-      if (!hasFemale) {
-        return res.status(400).json({ message: 'At least one female participant is required in every team.' });
-      }
-
       // Validate member details completeness
       for (let i = 0; i < members.length; i++) {
         const m = members[i];
@@ -1519,13 +1512,6 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
     // 2. Validate team size (3 to 5 total members)
     if (totalMembersCount < 3 || totalMembersCount > 5) {
       return res.status(400).json({ message: 'Your team must have between 3 and 5 members, including the Team Leader.' });
-    }
-
-    // 3. Validate female participant requirement
-    const allGenders = [leader.gender, ...members.map(m => m.gender)];
-    const hasFemale = allGenders.some(g => String(g).trim().toLowerCase() === 'female');
-    if (!hasFemale) {
-      return res.status(400).json({ message: 'At least one female participant is required in every team.' });
     }
 
     // 4. Validate unique email addresses and not already in team/database
