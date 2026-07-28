@@ -353,19 +353,23 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
       }
     }
 
-    await Users.updateOne(user.id, {
+    const updateData: any = {
       name: name || user.name,
       phone,
       college,
       rollNumber,
       branch,
       year,
-      gender,
       linkedin,
       portfolio,
       tshirtSize: tshirtSize || 'M',
       profileCompleted: true
-    });
+    };
+    if (gender) {
+      updateData.gender = gender;
+    }
+
+    await Users.updateOne(user.id, updateData);
     user = await Users.findOne({ id: user.id });
   } else if (!user) {
     // If sign up details are missing, tell the frontend to collect them
@@ -1804,7 +1808,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
           rollNumber: rollNumber || '',
           branch: branch || 'Unknown',
           year: year || '1st Year',
-          gender: gender || 'Male',
+          gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
           tshirtSize: tshirtSize || 'M',
           foodPreference: foodPreference || 'Veg',
           linkedin: '',
@@ -1824,7 +1828,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
           rollNumber: rollNumber || targetUser.rollNumber || '',
           branch: branch || targetUser.branch || 'Unknown',
           year: year || targetUser.year || '1st Year',
-          gender: gender || targetUser.gender || 'Male',
+          gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
           tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
           foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
           profileCompleted: true
@@ -1893,7 +1897,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
       name, email: email.toLowerCase(),
       phone: phone || leader.phone, college: college || leader.college,
       rollNumber: rollNumber || '', branch: branch || 'Unknown',
-      year: year || '1st Year', gender: gender || 'Male',
+      year: year || '1st Year', gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
       tshirtSize: tshirtSize || 'M', foodPreference: foodPreference || 'Veg',
       linkedin: '', role: 'participant', paymentStatus: paymentStatus,
       amountPaid: 0, checkedIn: false,
@@ -1907,7 +1911,7 @@ router.post('/teams/add-member', authenticateToken, async (req: AuthRequest, res
       rollNumber: rollNumber || targetUser.rollNumber || '',
       branch: branch || targetUser.branch || 'Unknown',
       year: year || targetUser.year || '1st Year',
-      gender: gender || targetUser.gender || 'Male',
+      gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
       tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
       foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
       profileCompleted: true
