@@ -188,6 +188,22 @@ export interface VisitorLog {
   lastVisitedAt: string;
 }
 
+export interface AdminAllowlistEntry {
+  id: string;
+  email: string;       // stored lowercase
+  name: string;
+  addedAt: string;
+}
+
+export interface OtpRecord {
+  id: string;
+  email: string;       // lowercase
+  code: string;        // 6-digit string
+  expiresAt: string;   // ISO timestamp
+  used: boolean;
+  createdAt: string;
+}
+
 // ─── Shared Schema Options ────────────────────────────────────────────────────
 
 const baseOpts = { strict: false };
@@ -211,8 +227,10 @@ const HighlightModel  = makeModel('Highlight');
 const TimelineModel   = makeModel('Timeline');
 const CoordinatorModel = makeModel('Coordinator');
 const CollegeModel    = makeModel('College');
-const ProblemModel    = makeModel('Problem');
-const VisitorModel    = makeModel('Visitor');
+const ProblemModel        = makeModel('Problem');
+const VisitorModel        = makeModel('Visitor');
+const AdminAllowlistModel = makeModel('AdminAllowlist');
+const OtpStoreModel       = makeModel('OtpStore');
 
 // ─── Generic Collection Wrapper ───────────────────────────────────────────────
 
@@ -288,8 +306,10 @@ export const HighlightsDb  = new MongoCollection<HighlightAlbum>(HighlightModel)
 export const TimelineDb    = new MongoCollection<TimelineEvent>(TimelineModel);
 export const CoordinatorsDb = new MongoCollection<Coordinator>(CoordinatorModel);
 export const CollegesDb     = new MongoCollection<College>(CollegeModel);
-export const ProblemDb      = new MongoCollection<ProblemStatement>(ProblemModel);
-export const VisitorLogs    = new MongoCollection<VisitorLog>(VisitorModel);
+export const ProblemDb       = new MongoCollection<ProblemStatement>(ProblemModel);
+export const VisitorLogs     = new MongoCollection<VisitorLog>(VisitorModel);
+export const AdminAllowlist  = new MongoCollection<AdminAllowlistEntry>(AdminAllowlistModel);
+export const OtpStore        = new MongoCollection<OtpRecord>(OtpStoreModel);
 
 // ─── MongoDB Connection ───────────────────────────────────────────────────────
 
@@ -346,4 +366,22 @@ export async function seedDatabase() {
   }
 
   // Seeding of mock teams and users has been removed to keep the database clean from fake data.
+
+  // ── Seed AdminAllowlist (idempotent) ─────────────────────────────────────────
+  const allowedAdmins = [
+    { email: 'vamshi.c2002@gmail.com',       name: 'Vamshi' },
+    { email: 'abbupasha61@gmail.com',         name: 'AbbuPasha' },
+    { email: 'pasunoorilavanya30@gmail.com',  name: 'Lavanya' },
+  ];
+  for (const admin of allowedAdmins) {
+    const exists = await AdminAllowlist.findOne({ email: admin.email });
+    if (!exists) {
+      await AdminAllowlist.create({
+        email: admin.email,
+        name: admin.name,
+        addedAt: new Date().toISOString(),
+      });
+      console.log(`[DB] Admin allowlist seeded: ${admin.email}`);
+    }
+  }
 }

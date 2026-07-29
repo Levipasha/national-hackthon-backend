@@ -7,7 +7,9 @@ import Razorpay from 'razorpay';
 import dotenv from 'dotenv';
 import { 
   Users, Teams, Coupons, Notifications, Payments, Invites, GuestsDb, HighlightsDb, TimelineDb, CoordinatorsDb, CollegesDb, ProblemDb, VisitorLogs,
-  User, Team, Coupon, Notification, PaymentLog, TeamInvite, TimelineEvent, Coordinator, College, ProblemStatement, VisitorLog
+  AdminAllowlist, OtpStore,
+  User, Team, Coupon, Notification, PaymentLog, TeamInvite, TimelineEvent, Coordinator, College, ProblemStatement, VisitorLog,
+  AdminAllowlistEntry, OtpRecord
 } from '../config/db';
 
 dotenv.config();
@@ -79,8 +81,9 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
     const decoded = jwt.verify(token, JWT_SECRET) as { id: string; role: 'admin' | 'team-leader' | 'participant' };
     
     let user;
-    if (decoded.id === 'admin-local') {
-      user = { id: 'admin-local', role: 'admin' };
+    if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
+      // Covers legacy 'admin-local' and new Google-auth admin ids like 'admin-vamshi'
+      user = { id: decoded.id, role: 'admin' };
     } else {
       user = await Users.findOne({ id: decoded.id });
       if (!user) {
@@ -518,6 +521,173 @@ router.post('/auth/bypass-login', async (req: Request, res: Response) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN GOOGLE AUTH — Google sign-in + OTP email verification
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Helper: send OTP email
+async function sendOtpEmail(to: string, name: string, code: string) {
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+  });
+  await transporter.sendMail({
+    from: `"CodeSprint Admin" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: '🔐 Your Admin Login OTP — CodeSprint 2026',
+    html: `
+      <div style="font-family:Inter,sans-serif;max-width:480px;margin:0 auto;background:#09090b;color:#f4f4f5;border-radius:16px;overflow:hidden">
+        <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);padding:28px 32px">
+          <div style="font-size:22px;font-weight:800;letter-spacing:-0.5px">🛡️ Admin Access OTP</div>
+          <div style="font-size:13px;opacity:0.85;margin-top:4px">CodeSprint 2026 — Secure Login</div>
+        </div>
+        <div style="padding:32px">
+          <p style="margin:0 0 8px;font-size:14px;color:#a1a1aa">Hello <strong style="color:#f4f4f5">${name}</strong>,</p>
+          <p style="margin:0 0 24px;font-size:14px;color:#a1a1aa">Your one-time admin login code is:</p>
+          <div style="background:#18181b;border:1px solid #27272a;border-radius:12px;padding:24px;text-align:center;margin-bottom:24px">
+            <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#818cf8;font-family:monospace">${code}</div>
+          </div>
+          <p style="font-size:12px;color:#71717a;margin:0">This code expires in <strong>10 minutes</strong>. Do not share it with anyone.</p>
+          <p style="font-size:12px;color:#71717a;margin:12px 0 0">If you did not request this, ignore this email — someone may have used your Google account on the admin panel.</p>
+        </div>
+        <div style="background:#18181b;padding:16px 32px;border-top:1px solid #27272a;font-size:11px;color:#52525b;text-align:center">
+          CodeSprint 2026 · Audisankara University · Restricted Admin Access
+        </div>
+      </div>
+    `,
+  });
+}
+
+// A.1 — POST /api/admin/google-auth
+//   Body: { idToken: string }
+//   → verifies Google token, checks AdminAllowlist, sends OTP
+router.post('/admin/google-auth', async (req: Request, res: Response) => {
+  const { idToken } = req.body;
+  if (!idToken) return res.status(400).json({ message: 'Google ID token is required.' });
+
+  try {
+    // 1. Verify Firebase ID token via Identity Toolkit
+    const firebaseApiKey = process.env.FIREBASE_API_KEY || 'AIzaSyDmsAFVX-u4Mp_N_HVYO-62BLulWTKbpSE';
+    const verifyRes = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) }
+    );
+    if (!verifyRes.ok) return res.status(401).json({ message: 'Invalid or expired Google token.' });
+
+    const verifyData = await verifyRes.json() as any;
+    const gUser = verifyData?.users?.[0];
+    if (!gUser) return res.status(401).json({ message: 'Could not retrieve Google account info.' });
+
+    const email = (gUser.email || '').toLowerCase().trim();
+    const name  = gUser.displayName || email.split('@')[0];
+
+    // 2. Check AdminAllowlist
+    const allowed = await AdminAllowlist.findOne({ email } as any);
+    if (!allowed) {
+      return res.status(403).json({ message: `Access denied. ${email} is not an authorised admin.` });
+    }
+
+    // 3. Invalidate any existing OTPs for this email
+    const existing = await OtpStore.find({ email } as any);
+    for (const old of existing) {
+      await OtpStore.updateOne(old.id, { used: true } as any);
+    }
+
+    // 4. Generate 6-digit OTP
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 min
+    await OtpStore.create({ email, code, expiresAt, used: false, createdAt: new Date().toISOString() });
+
+    // 5. Send email
+    await sendOtpEmail(email, allowed.name, code);
+
+    // 6. Return masked email
+    const [localPart, domain] = email.split('@');
+    const masked = localPart.slice(0, 3) + '***@' + domain;
+    return res.json({ otpSent: true, email, maskedEmail: masked, name: allowed.name });
+
+  } catch (err) {
+    console.error('[Admin Google Auth] Error:', err);
+    return res.status(500).json({ message: 'Server error during Google authentication.' });
+  }
+});
+
+// A.2 — POST /api/admin/verify-otp
+//   Body: { email: string, code: string }
+//   → verifies OTP, returns JWT
+router.post('/admin/verify-otp', async (req: Request, res: Response) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ message: 'Email and OTP code are required.' });
+
+  try {
+    const normalEmail = email.toLowerCase().trim();
+
+    // Find a valid, unused OTP
+    const otpRecord = await OtpStore.findOne((o: OtpRecord) =>
+      o.email === normalEmail && o.code === String(code).trim() && !o.used
+    );
+
+    if (!otpRecord) {
+      return res.status(401).json({ message: 'Invalid OTP. Please check the code and try again.' });
+    }
+
+    // Check expiry
+    if (new Date() > new Date(otpRecord.expiresAt)) {
+      await OtpStore.updateOne(otpRecord.id, { used: true } as any);
+      return res.status(401).json({ message: 'OTP has expired. Please sign in with Google again.' });
+    }
+
+    // Mark used
+    await OtpStore.updateOne(otpRecord.id, { used: true } as any);
+
+    // Get allowlist entry for display name
+    const allowed = await AdminAllowlist.findOne({ email: normalEmail } as any);
+    const displayName = allowed?.name || normalEmail.split('@')[0];
+
+    // Issue JWT — 12h session
+    const adminUser = {
+      id: `admin-${normalEmail.split('@')[0]}`,
+      name: displayName,
+      email: normalEmail,
+      role: 'admin' as const,
+    };
+    const token = jwt.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+
+    return res.json({ token, user: adminUser });
+
+  } catch (err) {
+    console.error('[Admin Verify OTP] Error:', err);
+    return res.status(500).json({ message: 'Server error during OTP verification.' });
+  }
+});
+
+// A.3 — GET /api/admin/allowlist  — list allowed emails
+router.get('/admin/allowlist', authenticateToken, requireAdmin, async (_req: Request, res: Response) => {
+  const list = await AdminAllowlist.find();
+  return res.json(list);
+});
+
+// A.4 — POST /api/admin/allowlist  — add email
+router.post('/admin/allowlist', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { email, name } = req.body;
+  if (!email) return res.status(400).json({ message: 'Email is required.' });
+  const normalEmail = email.toLowerCase().trim();
+  const exists = await AdminAllowlist.findOne({ email: normalEmail } as any);
+  if (exists) return res.status(409).json({ message: `${normalEmail} is already in the allowlist.` });
+  const entry = await AdminAllowlist.create({ email: normalEmail, name: name || normalEmail.split('@')[0], addedAt: new Date().toISOString() });
+  return res.status(201).json(entry);
+});
+
+// A.5 — DELETE /api/admin/allowlist/:id  — remove email
+router.delete('/admin/allowlist/:id', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const deleted = await AdminAllowlist.deleteOne(id);
+  if (!deleted) return res.status(404).json({ message: 'Entry not found.' });
+  return res.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+
 // 4. Get Current User profile
 router.get('/auth/me', authenticateToken, async (req: AuthRequest, res: Response) => {
   if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
@@ -840,43 +1010,16 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
   let expectedAmount = (amount !== undefined && !isNaN(Number(amount))) ? Number(amount) : count * 399;
 
   try {
-    const ONE_TIME_FREE_EMAILS = ['athoshith1@gmail.com'];
-    const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-
-    const emailList: string[] = Array.isArray(req.body.emails)
-      ? req.body.emails
-      : [req.body.email, ...(req.body.memberEmails || [])].filter(Boolean);
-
-    const hasVipFree = emailList.some(e => VIP_FREE_EMAILS.includes(String(e).trim().toLowerCase()));
-
-    if (hasVipFree) {
-      expectedAmount = 0;
-    } else if (couponCode && (couponCode.toUpperCase() === 'FREE100' || couponCode.toUpperCase() === 'VIPFREE')) {
-      expectedAmount = 0;
-    } else {
-      // Check 1-time free email discount (e.g. athoshith1@gmail.com)
-      for (const mail of emailList) {
-        const cleanMail = String(mail).trim().toLowerCase();
-        if (ONE_TIME_FREE_EMAILS.includes(cleanMail)) {
-          const alreadyUsed = await Users.findOne(u => u.email.toLowerCase() === cleanMail && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
-          if (!alreadyUsed) {
-            expectedAmount = Math.max(0, expectedAmount - 399); // Waive 1 member share of ₹399
-            break;
-          }
+    if (couponCode) {
+      const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
+      if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+        let discountAmount = 0;
+        if (coupon.discountType === 'percentage') {
+          discountAmount = (expectedAmount * coupon.discountValue) / 100;
+        } else {
+          discountAmount = coupon.discountValue;
         }
-      }
-
-      if (couponCode) {
-        const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
-        if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
-          let discountAmount = 0;
-          if (coupon.discountType === 'percentage') {
-            discountAmount = (expectedAmount * coupon.discountValue) / 100;
-          } else {
-            discountAmount = coupon.discountValue;
-          }
-          expectedAmount = Math.max(0, expectedAmount - discountAmount);
-        }
+        expectedAmount = Math.max(0, expectedAmount - discountAmount);
       }
     }
 
@@ -933,13 +1076,8 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
     return res.status(400).json({ message: 'Missing required parameters' });
   }
 
-  // Check if leader/individual email belongs to VIP free access emails
-  const userEmail = (registrationType === 'TEAM' ? registrationDetails?.leader?.email : registrationDetails?.email) || '';
-  const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-  const isVipEmail = VIP_FREE_EMAILS.includes(String(userEmail).trim().toLowerCase());
-
   // Verify Razorpay signature
-  if (razorpay_signature !== 'mock_payment_signature' && !razorpay_signature?.startsWith('mock_') && razorpay_signature !== 'vip_free_bypass' && !isVipEmail && Number(amount) !== 0) {
+  if (razorpay_signature !== 'mock_payment_signature' && !razorpay_signature?.startsWith('mock_') && Number(amount) !== 0) {
     const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
     if (!keySecret) {
       return res.status(500).json({ message: 'Razorpay secret key is not configured on the backend' });
@@ -2446,7 +2584,47 @@ router.get('/admin/participants', authenticateToken, requireAdmin, async (req: R
   return res.json(enriched);
 });
 
-// 2b. Delete a participant
+// 2b. Update a participant's profile
+router.put('/admin/participants/:id', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const user = await Users.findOne({ id });
+  if (!user) return res.status(404).json({ message: 'User not found' });
+
+  const {
+    name, email, phone, college, branch, year, gender, linkedin,
+    paymentStatus, amountPaid, role, tshirtSize, foodPreference
+  } = req.body;
+
+  // If email is being changed, ensure it's not taken by someone else
+  if (email && email.toLowerCase().trim() !== user.email) {
+    const existing = await Users.findOne({ email: email.toLowerCase().trim() });
+    if (existing && existing.id !== id) {
+      return res.status(409).json({ message: `Email "${email}" is already used by another user.` });
+    }
+  }
+
+  const updates: Partial<typeof user> = {};
+  if (name !== undefined)          updates.name = name.trim();
+  if (email !== undefined)         updates.email = email.toLowerCase().trim();
+  if (phone !== undefined)         updates.phone = phone;
+  if (college !== undefined)       updates.college = college;
+  if (branch !== undefined)        updates.branch = branch;
+  if (year !== undefined)          updates.year = year;
+  if (gender !== undefined)        updates.gender = gender;
+  if (linkedin !== undefined)      updates.linkedin = linkedin;
+  if (paymentStatus !== undefined) updates.paymentStatus = paymentStatus;
+  if (amountPaid !== undefined)    updates.amountPaid = Number(amountPaid);
+  if (role !== undefined)          updates.role = role;
+  if (tshirtSize !== undefined)    updates.tshirtSize = tshirtSize || undefined;
+  if (foodPreference !== undefined) updates.foodPreference = foodPreference || undefined;
+
+  const updated = await Users.updateOne(id, updates);
+  if (!updated) return res.status(500).json({ message: 'Failed to update user' });
+
+  return res.json({ success: true, message: `${updated.name} updated successfully.`, user: updated });
+});
+
+// 2c. Delete a participant
 router.delete('/admin/participants/:id', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
   const { id } = req.params;
   const user = await Users.findOne({ id });
@@ -2574,6 +2752,140 @@ router.post('/admin/check-in', authenticateToken, requireAdmin, async (req: Requ
   return res.json({ success: true, message: `${user.name} checked in successfully.`, user: updatedUser });
 });
 
+
+// 3b. Admin: Add registration (individual or team) directly
+router.post('/admin/add-registration', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  const { type, individual, team } = req.body;
+
+  if (!type || !['individual', 'team'].includes(type)) {
+    return res.status(400).json({ message: 'type must be "individual" or "team"' });
+  }
+
+  const timestamp = new Date().toISOString();
+
+  // ── Individual ──────────────────────────────────────────────────────────────
+  if (type === 'individual') {
+    const { name, email, phone, college, branch, year, gender, linkedin, paymentStatus, amountPaid } = individual || {};
+    if (!name || !email) return res.status(400).json({ message: 'name and email are required for individual registration' });
+
+    const cleanEmail = email.toLowerCase().trim();
+    const existing = await Users.findOne({ email: cleanEmail });
+    if (existing) return res.status(409).json({ message: `A user with email "${cleanEmail}" already exists.` });
+
+    const newUser = await Users.create({
+      name: name.trim(),
+      email: cleanEmail,
+      phone: phone || '9999999999',
+      college: college || '',
+      branch: branch || '',
+      year: year || '',
+      gender: gender || 'Not Specified',
+      linkedin: linkedin || 'https://linkedin.com',
+      role: 'participant',
+      paymentStatus: paymentStatus || 'paid',
+      amountPaid: Number(amountPaid) || 500,
+      teamRole: undefined,
+      teamId: undefined,
+      checkedIn: false,
+      createdAt: timestamp,
+    });
+
+    return res.json({ success: true, message: 'Individual participant added successfully.', user: newUser });
+  }
+
+  // ── Team ─────────────────────────────────────────────────────────────────────
+  if (type === 'team') {
+    const { teamName, college, branch, year, description, paymentStatus, amountPaid, leader, members } = team || {};
+    if (!teamName || !leader || !leader.name || !leader.email) {
+      return res.status(400).json({ message: 'teamName, leader.name, and leader.email are required' });
+    }
+
+    const leaderEmail = leader.email.toLowerCase().trim();
+
+    // Check/create leader
+    let leaderUser = await Users.findOne({ email: leaderEmail });
+    if (!leaderUser) {
+      leaderUser = await Users.create({
+        name: leader.name.trim(),
+        email: leaderEmail,
+        phone: leader.phone || '9999999999',
+        college: college || '',
+        branch: branch || '',
+        year: year || '',
+        gender: leader.gender || 'Not Specified',
+        linkedin: leader.linkedin || 'https://linkedin.com',
+        role: 'team-leader',
+        paymentStatus: paymentStatus || 'paid',
+        amountPaid: Number(amountPaid) || 500,
+        teamRole: 'leader',
+        checkedIn: false,
+        createdAt: timestamp,
+      });
+    } else {
+      await Users.updateOne(leaderUser.id, { role: 'team-leader', teamRole: 'leader' });
+      leaderUser = (await Users.findOne({ id: leaderUser.id }))!;
+    }
+
+    // Check/create members
+    const memberIds: string[] = [leaderUser.id];
+    const memberList = Array.isArray(members) ? members : [];
+
+    for (const mem of memberList) {
+      if (!mem.email || !mem.name) continue;
+      const memEmail = mem.email.toLowerCase().trim();
+      let memUser = await Users.findOne({ email: memEmail });
+      if (!memUser) {
+        memUser = await Users.create({
+          name: mem.name.trim(),
+          email: memEmail,
+          phone: mem.phone || '9999999999',
+          college: college || '',
+          branch: branch || '',
+          year: year || '',
+          gender: mem.gender || 'Not Specified',
+          linkedin: mem.linkedin || 'https://linkedin.com',
+          role: 'participant',
+          paymentStatus: paymentStatus || 'paid',
+          amountPaid: Number(amountPaid) || 500,
+          teamRole: 'member',
+          checkedIn: false,
+          createdAt: timestamp,
+        });
+      } else {
+        await Users.updateOne(memUser.id, { role: 'participant', teamRole: 'member' });
+        memUser = (await Users.findOne({ id: memUser.id }))!;
+      }
+      memberIds.push(memUser.id);
+    }
+
+    // Create team
+    const totalMembers = memberIds.length;
+    const remainingSlots = Math.max(0, 5 - totalMembers);
+    const status = totalMembers >= 5 ? 'full' as const : 'open' as const;
+    const slug = teamName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const inviteLink = `${FRONTEND_BASE_URL}/teams/join?teamId=${slug}`;
+
+    const newTeam = await Teams.create({
+      name: teamName.trim(),
+      description: description || `Team ${teamName} from ${college || 'Unknown College'}`,
+      college: college || '',
+      leaderId: leaderUser.id,
+      members: memberIds,
+      remainingSlots,
+      status,
+      inviteLink,
+      joinRequests: [],
+      createdAt: timestamp,
+    });
+
+    // Link all members to team
+    for (const uid of memberIds) {
+      await Users.updateOne(uid, { teamId: newTeam.id });
+    }
+
+    return res.json({ success: true, message: `Team "${teamName}" and ${memberIds.length} member(s) added successfully.`, team: newTeam });
+  }
+});
 
 
 // 4. Coupons listing (with usage count)
@@ -2769,7 +3081,7 @@ router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Req
   const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,RegistrationDate\n';
   const participantRows = users.map(u => {
     const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"http://localhost:3000","${u.createdAt}"`;
+    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${FRONTEND_BASE_URL}","${u.createdAt}"`;
   }).join('\n');
 
   const csvContent = 
