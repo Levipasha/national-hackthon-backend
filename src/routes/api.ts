@@ -24,21 +24,49 @@ const razorpay = new Razorpay({
 });
 
 /**
- * Normalizes college names to map typos, spacing, and casing to canonical college names
+ * Normalizes college names to strip raw CSV quotes, numbers, IDs, and type prefixes ("Private", "State", "Deemed"), mapping typos and casing to clean canonical college names.
  */
 export function normalizeCollegeName(rawName: string): string {
   if (!rawName) return '';
-  let cleaned = rawName.trim().replace(/\s+/g, ' ');
+  let str = String(rawName).trim();
+
+  // Strip outer quotes if any
+  str = str.replace(/^["'\s]+|["'\s]+$/g, '');
+
+  // If CSV line format: 1001","Private","Sharda University" or 1001,Private,Sharda University
+  if (str.includes('","') || str.includes('", "') || str.includes('",') || str.includes(',"')) {
+    const parts = str.split(/",\s*"|",|,"/).map(p => p.replace(/^"+|"+$/g, '').trim());
+    const cleanPart = parts.find(p => {
+      const low = p.toLowerCase().trim();
+      if (/^\d+$/.test(low)) return false;
+      if (['private', 'state', 'central', 'deemed to be universities', 'deemed university', 'deemed', 'government'].includes(low)) return false;
+      return true;
+    });
+    if (cleanPart) str = cleanPart;
+  }
+
+  // Remove leading numbers & quotes/commas
+  str = str.replace(/^\d+[\s,"']*/, '');
+
+  // Remove category prefixes (e.g., Private, State, Central, Deemed)
+  str = str.replace(/^(Private|State|Central|Deemed to be Universities|Deemed|Government)\s*[\s,"'-]*/i, '');
+
+  // Remove leftover quotes and backslashes
+  str = str.replace(/["'\\]/g, '');
+
+  // Remove any leftover leading numbers or symbols
+  str = str.replace(/^[\d\s,.-]+/, '');
 
   // Common spelling typos & variations
-  cleaned = cleaned.replace(/instuite/gi, 'Institute');
-  cleaned = cleaned.replace(/instittue/gi, 'Institute');
-  cleaned = cleaned.replace(/intstitute/gi, 'Institute');
-  cleaned = cleaned.replace(/universty/gi, 'University');
-  cleaned = cleaned.replace(/univercity/gi, 'University');
+  str = str.replace(/\s+/g, ' ').trim();
+  str = str.replace(/instuite/gi, 'Institute');
+  str = str.replace(/instittue/gi, 'Institute');
+  str = str.replace(/intstitute/gi, 'Institute');
+  str = str.replace(/universty/gi, 'University');
+  str = str.replace(/univercity/gi, 'University');
 
-  // Standardize capitalization (Title Case)
-  return cleaned
+  // Title Case
+  return str
     .split(' ')
     .map(word => {
       const lower = word.toLowerCase();
@@ -49,6 +77,31 @@ export function normalizeCollegeName(rawName: string): string {
     })
     .join(' ');
 }
+
+
+/**
+ * Ensures a college name exists in CollegesDb. If not, normalizes and saves it.
+ */
+export async function ensureCollegeExists(rawName: string): Promise<string> {
+  if (!rawName) return '';
+  const trimmed = rawName.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'other' || trimmed.toLowerCase() === 'n/a') {
+    return trimmed;
+  }
+  const normalized = normalizeCollegeName(trimmed);
+  const existing = await CollegesDb.find({});
+  const exists = existing.some((c: any) => c.name.toLowerCase().trim() === normalized.toLowerCase().trim());
+  if (!exists) {
+    await CollegesDb.create({
+      id: `col_${uuidv4()}`,
+      name: normalized,
+      createdAt: new Date().toISOString()
+    });
+    console.log(`[CollegesDb] Saved new college to database: ${normalized}`);
+  }
+  return normalized;
+}
+
 
 
 
@@ -341,6 +394,8 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
 
   let user = await Users.findOne({ email: email.toLowerCase() });
 
+  const normCollege = college ? await ensureCollegeExists(college) : '';
+
   if (user && user.profileCompleted === false) {
     // Existing pre-paid member completing profile details!
     if (phone) {
@@ -359,7 +414,7 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
     const updateData: any = {
       name: name || user.name,
       phone,
-      college,
+      college: normCollege || college,
       rollNumber,
       branch,
       year,
@@ -801,11 +856,13 @@ router.get('/public/teams', async (req: Request, res: Response) => {
 
 // 2. Get distinct college names that are participating
 router.get('/public/colleges', async (req: Request, res: Response) => {
+  const dbColleges = await CollegesDb.find({});
   const usersList = await Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
   const collegesSet = new Set(
-    usersList
-      .map(u => (u.college ? u.college.trim() : ''))
-      .filter(c => c && c.toLowerCase() !== 'codesprint core' && c.toLowerCase() !== 'n/a')
+    [
+      ...dbColleges.map((c: any) => (c.name ? c.name.trim() : '')),
+      ...usersList.map(u => (u.college ? u.college.trim() : ''))
+    ].filter(c => c && c.toLowerCase() !== 'codesprint core' && c.toLowerCase() !== 'n/a')
   );
   return res.json(Array.from(collegesSet).sort());
 });
@@ -1151,6 +1208,14 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         finalTeamCode = await generateTeamId();
       }
 
+      // Save new college names to CollegesDb
+      const normLeaderCollege = await ensureCollegeExists(leader.college);
+      leader.college = normLeaderCollege;
+
+      for (let i = 0; i < members.length; i++) {
+        members[i].college = await ensureCollegeExists(members[i].college || normLeaderCollege);
+      }
+
       // Create or update leader
       let leaderUser = await Users.findOne({ email: leader.email.toLowerCase() });
       const leaderData = {
@@ -1303,12 +1368,14 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
       }
 
+      const normIndividualCollege = await ensureCollegeExists(college);
+
       let existingRecord = await Users.findOne({ email: email.toLowerCase() });
       const individualData = {
         name,
         email: email.toLowerCase(),
         phone,
-        college,
+        college: normIndividualCollege || college,
         rollNumber,
         branch,
         year,
@@ -1702,7 +1769,15 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       }
     }
 
-    // 5. Create or retrieve/update leader user
+    // 5. Save new college names to CollegesDb
+    const normLeaderCollege = await ensureCollegeExists(leader.college);
+    leader.college = normLeaderCollege;
+
+    for (let i = 0; i < members.length; i++) {
+      members[i].college = await ensureCollegeExists(members[i].college || normLeaderCollege);
+    }
+
+    // Create or retrieve/update leader user
     let leaderUser = await Users.findOne({ email: leader.email.toLowerCase() });
     const leaderId = leaderUser ? leaderUser.id : `u_${Math.random().toString(36).substring(2, 9)}`;
 
@@ -3397,7 +3472,271 @@ router.delete('/admin/coordinators/:id', authenticateToken, requireAdmin, async 
 
 router.get('/colleges', async (req: Request, res: Response) => {
   const colleges = await CollegesDb.find({});
+  colleges.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || ''));
   res.json(colleges);
+});
+
+router.post('/public/colleges/ensure', async (req: Request, res: Response) => {
+  const { name } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ message: 'College name is required.' });
+  }
+  const savedName = await ensureCollegeExists(String(name));
+  return res.json({ success: true, name: savedName });
+});
+
+// A.0 — POST /api/admin/send-otp
+//   Body: { email: string }
+//   Sends 6-digit verification OTP code to authorised admin email
+router.post('/admin/send-otp', async (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (!email || !String(email).trim()) {
+    return res.status(400).json({ message: 'Admin email address is required.' });
+  }
+
+  try {
+    const normalEmail = String(email).toLowerCase().trim();
+
+    // Check AdminAllowlist or Users DB with role === 'admin'
+    const allowed = await AdminAllowlist.findOne({ email: normalEmail } as any);
+    const adminUser = await Users.findOne({ email: normalEmail, role: 'admin' });
+
+    if (!allowed && !adminUser && normalEmail !== 'admin@codesprint.com' && normalEmail !== 'admin@local.com') {
+      return res.status(403).json({ message: `Access denied. "${normalEmail}" is not an authorised admin email.` });
+    }
+
+    const recipientName = allowed?.name || adminUser?.name || normalEmail.split('@')[0];
+
+    // Invalidate old unused OTPs for this email
+    const existing = await OtpStore.find({ email: normalEmail } as any);
+    for (const old of existing) {
+      await OtpStore.updateOne(old.id, { used: true } as any);
+    }
+
+    // Generate 6-digit OTP code
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 mins
+    await OtpStore.create({
+      email: normalEmail,
+      code,
+      expiresAt,
+      used: false,
+      createdAt: new Date().toISOString()
+    });
+
+    // Send Email via Transporter
+    const mailOptions = {
+      from: `"CodeSprint 2026 Admin" <${process.env.EMAIL_USER || 'administrator@audisankara.ac.in'}>`,
+      to: normalEmail,
+      subject: `CodeSprint 2026 — Admin Verification Code: ${code}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e4e4e7; border-radius: 12px; background: #ffffff;">
+          <h2 style="color: #6366f1; margin-top: 0;">Admin Control Panel Verification</h2>
+          <p>Hello <strong>${recipientName}</strong>,</p>
+          <p>Your one-time login verification code for CodeSprint 2026 Admin Control Panel is:</p>
+          <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #18181b; background: #f4f4f5; padding: 16px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            ${code}
+          </div>
+          <p style="font-size: 13px; color: #71717a;">This code is valid for 10 minutes. Do not share this code with anyone.</p>
+        </div>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+    } catch (mailErr) {
+      console.error('[Admin Send Mail Error]:', mailErr);
+    }
+
+    const [userPart, domainPart] = normalEmail.split('@');
+    const maskedUser = userPart.length > 2 ? `${userPart[0]}***${userPart[userPart.length - 1]}` : `${userPart[0]}***`;
+    const maskedEmail = `${maskedUser}@${domainPart}`;
+
+    return res.json({
+      success: true,
+      email: normalEmail,
+      maskedEmail,
+      name: recipientName,
+      message: `Verification code sent to ${maskedEmail}`
+    });
+  } catch (err: any) {
+    console.error('[Admin Send OTP Error]:', err);
+    return res.status(500).json({ message: err.message || 'Failed to send verification OTP code.' });
+  }
+});
+
+
+// Admin: Add a new college manually
+router.post('/admin/colleges', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const { name } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ message: 'College name is required.' });
+  }
+  const normalized = normalizeCollegeName(String(name).trim());
+  const existing = await CollegesDb.find({});
+  const exists = existing.find((c: any) => c.name.toLowerCase().trim() === normalized.toLowerCase());
+  if (exists) {
+    return res.status(400).json({ message: `College "${exists.name}" already exists.` });
+  }
+  const created = await CollegesDb.create({
+    id: `col_${uuidv4()}`,
+    name: normalized,
+    createdAt: new Date().toISOString()
+  });
+  return res.status(201).json(created);
+});
+
+// Admin: Edit / Rename an existing college in DB (and cascade to users & teams)
+router.put('/admin/colleges/:id', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ message: 'New college name is required.' });
+  }
+
+  const collegeDoc = await CollegesDb.findOne({ id });
+  if (!collegeDoc) {
+    return res.status(404).json({ message: 'College not found.' });
+  }
+
+  const oldName = collegeDoc.name;
+  const newName = normalizeCollegeName(String(name).trim());
+
+  // Update CollegesDb
+  const updated = await CollegesDb.updateOne(id, { name: newName });
+
+  // Cascade update all users with old college name
+  const usersToUpdate = await Users.find((u: any) => u.college && u.college.toLowerCase().trim() === oldName.toLowerCase().trim());
+  for (const u of usersToUpdate) {
+    await Users.updateOne(u.id, { college: newName });
+  }
+
+  // Cascade update all teams with old college name
+  const teamsToUpdate = await Teams.find((t: any) => t.college && t.college.toLowerCase().trim() === oldName.toLowerCase().trim());
+  for (const t of teamsToUpdate) {
+    await Teams.updateOne(t.id, { college: newName });
+  }
+
+  return res.json({ success: true, college: updated, updatedUsers: usersToUpdate.length, updatedTeams: teamsToUpdate.length });
+});
+
+// Admin: Delete a college from database
+router.delete('/admin/colleges/:id', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const deleted = await CollegesDb.deleteOne(id);
+  if (!deleted) {
+    return res.status(404).json({ message: 'College not found.' });
+  }
+  return res.json({ success: true, message: 'College deleted successfully.' });
+});
+
+// Admin: Update college for a specific participant
+router.put('/admin/users/:id/college', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const { college } = req.body;
+  if (!college || !String(college).trim()) {
+    return res.status(400).json({ message: 'College name is required.' });
+  }
+
+  const user = await Users.findOne({ id });
+  if (!user) {
+    return res.status(404).json({ message: 'User not found.' });
+  }
+
+  const normalized = await ensureCollegeExists(String(college));
+  await Users.updateOne(id, { college: normalized });
+
+  // If user is leader of a team, update team college as well
+  if (user.teamId && user.role === 'team-leader') {
+    await Teams.updateOne(user.teamId, { college: normalized });
+  }
+
+  const updatedUser = await Users.findOne({ id });
+  return res.json({ success: true, user: updatedUser });
+});
+
+// Admin: Update college for a specific team
+router.put('/admin/teams/:id/college', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const { college } = req.body;
+  if (!college || !String(college).trim()) {
+    return res.status(400).json({ message: 'College name is required.' });
+  }
+
+  const team = await Teams.findOne({ id });
+  if (!team) {
+    return res.status(404).json({ message: 'Team not found.' });
+  }
+
+  const normalized = await ensureCollegeExists(String(college));
+  await Teams.updateOne(id, { college: normalized });
+
+  // Optionally update all team members' college
+  for (const memberId of team.members) {
+    await Users.updateOne(memberId, { college: normalized });
+  }
+
+  const updatedTeam = await Teams.findOne({ id });
+  return res.json({ success: true, team: updatedTeam });
+});
+
+
+
+router.post('/admin/colleges/cleanup', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+  const allColleges = await CollegesDb.find({});
+  let cleanedCount = 0;
+  let mergedCount = 0;
+  const nameToIdMap = new Map<string, string>();
+
+  for (const col of allColleges) {
+    const cleanName = normalizeCollegeName(col.name);
+    if (!cleanName || cleanName.length < 2) {
+      await CollegesDb.deleteOne(col.id);
+      cleanedCount++;
+      continue;
+    }
+
+    const lowerKey = cleanName.toLowerCase().trim();
+    if (nameToIdMap.has(lowerKey)) {
+      // Duplicate college: delete duplicate from CollegesDb
+      await CollegesDb.deleteOne(col.id);
+      mergedCount++;
+    } else {
+      nameToIdMap.set(lowerKey, col.id);
+      if (col.name !== cleanName) {
+        await CollegesDb.updateOne(col.id, { name: cleanName });
+        cleanedCount++;
+      }
+    }
+  }
+
+  // Also clean up Users and Teams college names
+  const allUsers = await Users.find({});
+  for (const u of allUsers) {
+    if (u.college) {
+      const cleaned = normalizeCollegeName(u.college);
+      if (cleaned !== u.college) {
+        await Users.updateOne(u.id, { college: cleaned });
+      }
+    }
+  }
+
+  const allTeams = await Teams.find({});
+  for (const t of allTeams) {
+    if (t.college) {
+      const cleaned = normalizeCollegeName(t.college);
+      if (cleaned !== t.college) {
+        await Teams.updateOne(t.id, { college: cleaned });
+      }
+    }
+  }
+
+  const remaining = await CollegesDb.find({});
+  return res.json({
+    success: true,
+    message: `Database cleaned! Cleaned ${cleanedCount} entries and merged ${mergedCount} duplicates.`,
+    totalCollegesRemaining: remaining.length
+  });
 });
 
 router.post('/admin/colleges/upload', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
@@ -3408,29 +3747,27 @@ router.post('/admin/colleges/upload', authenticateToken, requireAdmin, async (re
   const existing = await CollegesDb.find({});
   const existingNames = new Set(existing.map((c: any) => c.name.toLowerCase().trim()));
 
-  // Parse CSV (assuming 1 column for college name)
+  // Parse CSV
   const lines = csvContent.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
   const added = [];
-  // Skip header if it says 'college' or 'name'
-  if (lines[0].toLowerCase().includes('college') || lines[0].toLowerCase().includes('name')) {
-    lines.shift();
-  }
 
   for (const line of lines) {
-    const name = line.replace(/(^"|"$)/g, '').trim(); // basic CSV quote stripping
-    if (name && !existingNames.has(name.toLowerCase())) {
+    const name = normalizeCollegeName(line);
+    if (name && name.length > 2 && !existingNames.has(name.toLowerCase())) {
       const col = await CollegesDb.create({
         id: `col_${uuidv4()}`,
         name,
         createdAt: new Date().toISOString()
       });
       added.push(col);
-      existingNames.add(name.toLowerCase()); // prevent intra-upload dupes too
+      existingNames.add(name.toLowerCase());
     }
   }
+
   const totalNow = existing.length + added.length;
-  res.json({ success: true, count: added.length, total: totalNow, message: `Added ${added.length} new college(s). Total: ${totalNow}.` });
+  return res.json({ success: true, count: added.length, total: totalNow, message: `Added ${added.length} clean college(s). Total: ${totalNow}.` });
 });
+
 
 // ─── PROBLEM STATEMENTS ROUTES ───────────────────────────────────────────────
 

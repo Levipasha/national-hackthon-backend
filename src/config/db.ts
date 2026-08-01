@@ -372,6 +372,7 @@ export async function seedDatabase() {
     { email: 'vamshi.c2002@gmail.com',       name: 'Vamshi' },
     { email: 'abbupasha61@gmail.com',         name: 'AbbuPasha' },
     { email: 'pasunoorilavanya30@gmail.com',  name: 'Lavanya' },
+    { email: 'nikhitha.sreeni17@gmail.com',  name: 'Nikhitha' },
   ];
   for (const admin of allowedAdmins) {
     const exists = await AdminAllowlist.findOne({ email: admin.email });

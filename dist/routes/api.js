@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.requireAdmin = exports.authenticateToken = void 0;
 exports.normalizeCollegeName = normalizeCollegeName;
+exports.ensureCollegeExists = ensureCollegeExists;
 const express_1 = require("express");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const uuid_1 = require("uuid");
@@ -22,20 +23,45 @@ const razorpay = new razorpay_1.default({
     key_secret: process.env.RAZORPAY_KEY_SECRET || process.env.key_secret || ''
 });
 /**
- * Normalizes college names to map typos, spacing, and casing to canonical college names
+ * Normalizes college names to strip raw CSV quotes, numbers, IDs, and type prefixes ("Private", "State", "Deemed"), mapping typos and casing to clean canonical college names.
  */
 function normalizeCollegeName(rawName) {
     if (!rawName)
         return '';
-    let cleaned = rawName.trim().replace(/\s+/g, ' ');
+    let str = String(rawName).trim();
+    // Strip outer quotes if any
+    str = str.replace(/^["'\s]+|["'\s]+$/g, '');
+    // If CSV line format: 1001","Private","Sharda University" or 1001,Private,Sharda University
+    if (str.includes('","') || str.includes('", "') || str.includes('",') || str.includes(',"')) {
+        const parts = str.split(/",\s*"|",|,"/).map(p => p.replace(/^"+|"+$/g, '').trim());
+        const cleanPart = parts.find(p => {
+            const low = p.toLowerCase().trim();
+            if (/^\d+$/.test(low))
+                return false;
+            if (['private', 'state', 'central', 'deemed to be universities', 'deemed university', 'deemed', 'government'].includes(low))
+                return false;
+            return true;
+        });
+        if (cleanPart)
+            str = cleanPart;
+    }
+    // Remove leading numbers & quotes/commas
+    str = str.replace(/^\d+[\s,"']*/, '');
+    // Remove category prefixes (e.g., Private, State, Central, Deemed)
+    str = str.replace(/^(Private|State|Central|Deemed to be Universities|Deemed|Government)\s*[\s,"'-]*/i, '');
+    // Remove leftover quotes and backslashes
+    str = str.replace(/["'\\]/g, '');
+    // Remove any leftover leading numbers or symbols
+    str = str.replace(/^[\d\s,.-]+/, '');
     // Common spelling typos & variations
-    cleaned = cleaned.replace(/instuite/gi, 'Institute');
-    cleaned = cleaned.replace(/instittue/gi, 'Institute');
-    cleaned = cleaned.replace(/intstitute/gi, 'Institute');
-    cleaned = cleaned.replace(/universty/gi, 'University');
-    cleaned = cleaned.replace(/univercity/gi, 'University');
-    // Standardize capitalization (Title Case)
-    return cleaned
+    str = str.replace(/\s+/g, ' ').trim();
+    str = str.replace(/instuite/gi, 'Institute');
+    str = str.replace(/instittue/gi, 'Institute');
+    str = str.replace(/intstitute/gi, 'Institute');
+    str = str.replace(/universty/gi, 'University');
+    str = str.replace(/univercity/gi, 'University');
+    // Title Case
+    return str
         .split(' ')
         .map(word => {
         const lower = word.toLowerCase();
@@ -45,6 +71,29 @@ function normalizeCollegeName(rawName) {
         return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
         .join(' ');
+}
+/**
+ * Ensures a college name exists in CollegesDb. If not, normalizes and saves it.
+ */
+async function ensureCollegeExists(rawName) {
+    if (!rawName)
+        return '';
+    const trimmed = rawName.trim();
+    if (!trimmed || trimmed.toLowerCase() === 'other' || trimmed.toLowerCase() === 'n/a') {
+        return trimmed;
+    }
+    const normalized = normalizeCollegeName(trimmed);
+    const existing = await db_1.CollegesDb.find({});
+    const exists = existing.some((c) => c.name.toLowerCase().trim() === normalized.toLowerCase().trim());
+    if (!exists) {
+        await db_1.CollegesDb.create({
+            id: `col_${(0, uuid_1.v4)()}`,
+            name: normalized,
+            createdAt: new Date().toISOString()
+        });
+        console.log(`[CollegesDb] Saved new college to database: ${normalized}`);
+    }
+    return normalized;
 }
 const transporter = nodemailer_1.default.createTransport({
     service: 'gmail',
@@ -63,8 +112,9 @@ const authenticateToken = async (req, res, next) => {
     try {
         const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
         let user;
-        if (decoded.id === 'admin-local') {
-            user = { id: 'admin-local', role: 'admin' };
+        if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
+            // Covers legacy 'admin-local' and new Google-auth admin ids like 'admin-vamshi'
+            user = { id: decoded.id, role: 'admin' };
         }
         else {
             user = await db_1.Users.findOne({ id: decoded.id });
@@ -306,6 +356,7 @@ router.post('/auth/otp-verify', async (req, res) => {
         return res.status(400).json({ message: 'Email is required' });
     }
     let user = await db_1.Users.findOne({ email: email.toLowerCase() });
+    const normCollege = college ? await ensureCollegeExists(college) : '';
     if (user && user.profileCompleted === false) {
         // Existing pre-paid member completing profile details!
         if (phone) {
@@ -320,19 +371,22 @@ router.post('/auth/otp-verify', async (req, res) => {
                 return res.status(400).json({ message: 'Roll number / ID number is already registered.' });
             }
         }
-        await db_1.Users.updateOne(user.id, {
+        const updateData = {
             name: name || user.name,
             phone,
-            college,
+            college: normCollege || college,
             rollNumber,
             branch,
             year,
-            gender,
             linkedin,
             portfolio,
             tshirtSize: tshirtSize || 'M',
             profileCompleted: true
-        });
+        };
+        if (gender) {
+            updateData.gender = gender;
+        }
+        await db_1.Users.updateOne(user.id, updateData);
         user = await db_1.Users.findOne({ id: user.id });
     }
     else if (!user) {
@@ -455,6 +509,151 @@ router.post('/auth/bypass-login', async (req, res) => {
         return res.status(500).json({ message: 'Server error during bypass login.' });
     }
 });
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN GOOGLE AUTH — Google sign-in + OTP email verification
+// ══════════════════════════════════════════════════════════════════════════════
+// Helper: send OTP email
+async function sendOtpEmail(to, name, code) {
+    const transporter = nodemailer_1.default.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+    });
+    await transporter.sendMail({
+        from: `"CodeSprint Admin" <${process.env.EMAIL_USER}>`,
+        to,
+        subject: '🔐 Your Admin Login OTP — CodeSprint 2026',
+        html: `
+      <div style="font-family:Inter,sans-serif;max-width:480px;margin:0 auto;background:#09090b;color:#f4f4f5;border-radius:16px;overflow:hidden">
+        <div style="background:linear-gradient(135deg,#6366f1,#8b5cf6);padding:28px 32px">
+          <div style="font-size:22px;font-weight:800;letter-spacing:-0.5px">🛡️ Admin Access OTP</div>
+          <div style="font-size:13px;opacity:0.85;margin-top:4px">CodeSprint 2026 — Secure Login</div>
+        </div>
+        <div style="padding:32px">
+          <p style="margin:0 0 8px;font-size:14px;color:#a1a1aa">Hello <strong style="color:#f4f4f5">${name}</strong>,</p>
+          <p style="margin:0 0 24px;font-size:14px;color:#a1a1aa">Your one-time admin login code is:</p>
+          <div style="background:#18181b;border:1px solid #27272a;border-radius:12px;padding:24px;text-align:center;margin-bottom:24px">
+            <div style="font-size:42px;font-weight:900;letter-spacing:12px;color:#818cf8;font-family:monospace">${code}</div>
+          </div>
+          <p style="font-size:12px;color:#71717a;margin:0">This code expires in <strong>10 minutes</strong>. Do not share it with anyone.</p>
+          <p style="font-size:12px;color:#71717a;margin:12px 0 0">If you did not request this, ignore this email — someone may have used your Google account on the admin panel.</p>
+        </div>
+        <div style="background:#18181b;padding:16px 32px;border-top:1px solid #27272a;font-size:11px;color:#52525b;text-align:center">
+          CodeSprint 2026 · Audisankara University · Restricted Admin Access
+        </div>
+      </div>
+    `,
+    });
+}
+// A.1 — POST /api/admin/google-auth
+//   Body: { idToken: string }
+//   → verifies Google token, checks AdminAllowlist, sends OTP
+router.post('/admin/google-auth', async (req, res) => {
+    const { idToken } = req.body;
+    if (!idToken)
+        return res.status(400).json({ message: 'Google ID token is required.' });
+    try {
+        // 1. Verify Firebase ID token via Identity Toolkit
+        const firebaseApiKey = process.env.FIREBASE_API_KEY || 'AIzaSyDmsAFVX-u4Mp_N_HVYO-62BLulWTKbpSE';
+        const verifyRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) });
+        if (!verifyRes.ok)
+            return res.status(401).json({ message: 'Invalid or expired Google token.' });
+        const verifyData = await verifyRes.json();
+        const gUser = verifyData?.users?.[0];
+        if (!gUser)
+            return res.status(401).json({ message: 'Could not retrieve Google account info.' });
+        const email = (gUser.email || '').toLowerCase().trim();
+        const name = gUser.displayName || email.split('@')[0];
+        // 2. Check AdminAllowlist
+        const allowed = await db_1.AdminAllowlist.findOne({ email });
+        if (!allowed) {
+            return res.status(403).json({ message: `Access denied. ${email} is not an authorised admin.` });
+        }
+        // 3. Invalidate any existing OTPs for this email
+        const existing = await db_1.OtpStore.find({ email });
+        for (const old of existing) {
+            await db_1.OtpStore.updateOne(old.id, { used: true });
+        }
+        // 4. Generate 6-digit OTP
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 min
+        await db_1.OtpStore.create({ email, code, expiresAt, used: false, createdAt: new Date().toISOString() });
+        // 5. Send email
+        await sendOtpEmail(email, allowed.name, code);
+        // 6. Return masked email
+        const [localPart, domain] = email.split('@');
+        const masked = localPart.slice(0, 3) + '***@' + domain;
+        return res.json({ otpSent: true, email, maskedEmail: masked, name: allowed.name });
+    }
+    catch (err) {
+        console.error('[Admin Google Auth] Error:', err);
+        return res.status(500).json({ message: 'Server error during Google authentication.' });
+    }
+});
+// A.2 — POST /api/admin/verify-otp
+//   Body: { email: string, code: string }
+//   → verifies OTP, returns JWT
+router.post('/admin/verify-otp', async (req, res) => {
+    const { email, code } = req.body;
+    if (!email || !code)
+        return res.status(400).json({ message: 'Email and OTP code are required.' });
+    try {
+        const normalEmail = email.toLowerCase().trim();
+        // Find a valid, unused OTP
+        const otpRecord = await db_1.OtpStore.findOne((o) => o.email === normalEmail && o.code === String(code).trim() && !o.used);
+        if (!otpRecord) {
+            return res.status(401).json({ message: 'Invalid OTP. Please check the code and try again.' });
+        }
+        // Check expiry
+        if (new Date() > new Date(otpRecord.expiresAt)) {
+            await db_1.OtpStore.updateOne(otpRecord.id, { used: true });
+            return res.status(401).json({ message: 'OTP has expired. Please sign in with Google again.' });
+        }
+        // Mark used
+        await db_1.OtpStore.updateOne(otpRecord.id, { used: true });
+        // Get allowlist entry for display name
+        const allowed = await db_1.AdminAllowlist.findOne({ email: normalEmail });
+        const displayName = allowed?.name || normalEmail.split('@')[0];
+        // Issue JWT — 12h session
+        const adminUser = {
+            id: `admin-${normalEmail.split('@')[0]}`,
+            name: displayName,
+            email: normalEmail,
+            role: 'admin',
+        };
+        const token = jsonwebtoken_1.default.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+        return res.json({ token, user: adminUser });
+    }
+    catch (err) {
+        console.error('[Admin Verify OTP] Error:', err);
+        return res.status(500).json({ message: 'Server error during OTP verification.' });
+    }
+});
+// A.3 — GET /api/admin/allowlist  — list allowed emails
+router.get('/admin/allowlist', exports.authenticateToken, exports.requireAdmin, async (_req, res) => {
+    const list = await db_1.AdminAllowlist.find();
+    return res.json(list);
+});
+// A.4 — POST /api/admin/allowlist  — add email
+router.post('/admin/allowlist', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { email, name } = req.body;
+    if (!email)
+        return res.status(400).json({ message: 'Email is required.' });
+    const normalEmail = email.toLowerCase().trim();
+    const exists = await db_1.AdminAllowlist.findOne({ email: normalEmail });
+    if (exists)
+        return res.status(409).json({ message: `${normalEmail} is already in the allowlist.` });
+    const entry = await db_1.AdminAllowlist.create({ email: normalEmail, name: name || normalEmail.split('@')[0], addedAt: new Date().toISOString() });
+    return res.status(201).json(entry);
+});
+// A.5 — DELETE /api/admin/allowlist/:id  — remove email
+router.delete('/admin/allowlist/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const deleted = await db_1.AdminAllowlist.deleteOne(id);
+    if (!deleted)
+        return res.status(404).json({ message: 'Entry not found.' });
+    return res.json({ success: true });
+});
+// ══════════════════════════════════════════════════════════════════════════════
 // 4. Get Current User profile
 router.get('/auth/me', exports.authenticateToken, async (req, res) => {
     if (!req.user)
@@ -548,10 +747,12 @@ router.get('/public/teams', async (req, res) => {
 });
 // 2. Get distinct college names that are participating
 router.get('/public/colleges', async (req, res) => {
+    const dbColleges = await db_1.CollegesDb.find({});
     const usersList = await db_1.Users.find(u => u.paymentStatus === 'paid' && u.role !== 'admin');
-    const collegesSet = new Set(usersList
-        .map(u => (u.college ? u.college.trim() : ''))
-        .filter(c => c && c.toLowerCase() !== 'codesprint core' && c.toLowerCase() !== 'n/a'));
+    const collegesSet = new Set([
+        ...dbColleges.map((c) => (c.name ? c.name.trim() : '')),
+        ...usersList.map(u => (u.college ? u.college.trim() : ''))
+    ].filter(c => c && c.toLowerCase() !== 'codesprint core' && c.toLowerCase() !== 'n/a'));
     return res.json(Array.from(collegesSet).sort());
 });
 // 2b. Get List of Public Participants
@@ -717,42 +918,17 @@ router.post('/payments/create-order-public', async (req, res) => {
     const count = Number(quantity) || 1;
     let expectedAmount = (amount !== undefined && !isNaN(Number(amount))) ? Number(amount) : count * 399;
     try {
-        const ONE_TIME_FREE_EMAILS = ['athoshith1@gmail.com'];
-        const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-        const emailList = Array.isArray(req.body.emails)
-            ? req.body.emails
-            : [req.body.email, ...(req.body.memberEmails || [])].filter(Boolean);
-        const hasVipFree = emailList.some(e => VIP_FREE_EMAILS.includes(String(e).trim().toLowerCase()));
-        if (hasVipFree) {
-            expectedAmount = 0;
-        }
-        else if (couponCode && (couponCode.toUpperCase() === 'FREE100' || couponCode.toUpperCase() === 'VIPFREE')) {
-            expectedAmount = 0;
-        }
-        else {
-            // Check 1-time free email discount (e.g. athoshith1@gmail.com)
-            for (const mail of emailList) {
-                const cleanMail = String(mail).trim().toLowerCase();
-                if (ONE_TIME_FREE_EMAILS.includes(cleanMail)) {
-                    const alreadyUsed = await db_1.Users.findOne(u => u.email.toLowerCase() === cleanMail && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
-                    if (!alreadyUsed) {
-                        expectedAmount = Math.max(0, expectedAmount - 399); // Waive 1 member share of ₹399
-                        break;
-                    }
+        if (couponCode) {
+            const coupon = await db_1.Coupons.findOne({ code: couponCode.toUpperCase() });
+            if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
+                let discountAmount = 0;
+                if (coupon.discountType === 'percentage') {
+                    discountAmount = (expectedAmount * coupon.discountValue) / 100;
                 }
-            }
-            if (couponCode) {
-                const coupon = await db_1.Coupons.findOne({ code: couponCode.toUpperCase() });
-                if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
-                    let discountAmount = 0;
-                    if (coupon.discountType === 'percentage') {
-                        discountAmount = (expectedAmount * coupon.discountValue) / 100;
-                    }
-                    else {
-                        discountAmount = coupon.discountValue;
-                    }
-                    expectedAmount = Math.max(0, expectedAmount - discountAmount);
+                else {
+                    discountAmount = coupon.discountValue;
                 }
+                expectedAmount = Math.max(0, expectedAmount - discountAmount);
             }
         }
         const keyId = process.env.RAZORPAY_KEY_ID || process.env.key_id;
@@ -802,12 +978,8 @@ router.post('/payments/verify-and-register', async (req, res) => {
     if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !registrationType || !registrationDetails) {
         return res.status(400).json({ message: 'Missing required parameters' });
     }
-    // Check if leader/individual email belongs to VIP free access emails
-    const userEmail = (registrationType === 'TEAM' ? registrationDetails?.leader?.email : registrationDetails?.email) || '';
-    const VIP_FREE_EMAILS = ['vamshi.c2002@gmail.com', 'vamshi.vam2002@gmail.com', 'abbupsha61@gmail.com', 'abbupasha61@gmail.com'];
-    const isVipEmail = VIP_FREE_EMAILS.includes(String(userEmail).trim().toLowerCase());
     // Verify Razorpay signature
-    if (razorpay_signature !== 'mock_payment_signature' && !razorpay_signature?.startsWith('mock_') && razorpay_signature !== 'vip_free_bypass' && !isVipEmail && Number(amount) !== 0) {
+    if (razorpay_signature !== 'mock_payment_signature' && !razorpay_signature?.startsWith('mock_') && Number(amount) !== 0) {
         const keySecret = process.env.RAZORPAY_KEY_SECRET || process.env.key_secret;
         if (!keySecret) {
             return res.status(500).json({ message: 'Razorpay secret key is not configured on the backend' });
@@ -871,6 +1043,12 @@ router.post('/payments/verify-and-register', async (req, res) => {
             const existingCode = await db_1.Teams.findOne(t => t.id.toLowerCase() === cleanTeamCode.toLowerCase());
             if (existingCode) {
                 finalTeamCode = await generateTeamId();
+            }
+            // Save new college names to CollegesDb
+            const normLeaderCollege = await ensureCollegeExists(leader.college);
+            leader.college = normLeaderCollege;
+            for (let i = 0; i < members.length; i++) {
+                members[i].college = await ensureCollegeExists(members[i].college || normLeaderCollege);
             }
             // Create or update leader
             let leaderUser = await db_1.Users.findOne({ email: leader.email.toLowerCase() });
@@ -1017,12 +1195,13 @@ router.post('/payments/verify-and-register', async (req, res) => {
                 if (existingRoll)
                     return res.status(400).json({ message: `Roll/ID number ${rollNumber} is already registered.` });
             }
+            const normIndividualCollege = await ensureCollegeExists(college);
             let existingRecord = await db_1.Users.findOne({ email: email.toLowerCase() });
             const individualData = {
                 name,
                 email: email.toLowerCase(),
                 phone,
-                college,
+                college: normIndividualCollege || college,
                 rollNumber,
                 branch,
                 year,
@@ -1386,7 +1565,13 @@ router.post('/teams/register-team-flow', async (req, res) => {
                 }
             }
         }
-        // 5. Create or retrieve/update leader user
+        // 5. Save new college names to CollegesDb
+        const normLeaderCollege = await ensureCollegeExists(leader.college);
+        leader.college = normLeaderCollege;
+        for (let i = 0; i < members.length; i++) {
+            members[i].college = await ensureCollegeExists(members[i].college || normLeaderCollege);
+        }
+        // Create or retrieve/update leader user
         let leaderUser = await db_1.Users.findOne({ email: leader.email.toLowerCase() });
         const leaderId = leaderUser ? leaderUser.id : `u_${Math.random().toString(36).substring(2, 9)}`;
         const leaderData = {
@@ -1609,7 +1794,7 @@ router.post('/teams/add-member', exports.authenticateToken, async (req, res) => 
                     rollNumber: rollNumber || '',
                     branch: branch || 'Unknown',
                     year: year || '1st Year',
-                    gender: gender || 'Male',
+                    gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
                     tshirtSize: tshirtSize || 'M',
                     foodPreference: foodPreference || 'Veg',
                     linkedin: '',
@@ -1630,7 +1815,7 @@ router.post('/teams/add-member', exports.authenticateToken, async (req, res) => 
                     rollNumber: rollNumber || targetUser.rollNumber || '',
                     branch: branch || targetUser.branch || 'Unknown',
                     year: year || targetUser.year || '1st Year',
-                    gender: gender || targetUser.gender || 'Male',
+                    gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
                     tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
                     foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
                     profileCompleted: true
@@ -1691,7 +1876,7 @@ router.post('/teams/add-member', exports.authenticateToken, async (req, res) => 
             name, email: email.toLowerCase(),
             phone: phone || leader.phone, college: college || leader.college,
             rollNumber: rollNumber || '', branch: branch || 'Unknown',
-            year: year || '1st Year', gender: gender || 'Male',
+            year: year || '1st Year', gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
             tshirtSize: tshirtSize || 'M', foodPreference: foodPreference || 'Veg',
             linkedin: '', role: 'participant', paymentStatus: paymentStatus,
             amountPaid: 0, checkedIn: false,
@@ -1706,7 +1891,7 @@ router.post('/teams/add-member', exports.authenticateToken, async (req, res) => 
             rollNumber: rollNumber || targetUser.rollNumber || '',
             branch: branch || targetUser.branch || 'Unknown',
             year: year || targetUser.year || '1st Year',
-            gender: gender || targetUser.gender || 'Male',
+            gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
             tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
             foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
             profileCompleted: true
@@ -2159,7 +2344,53 @@ router.get('/admin/participants', exports.authenticateToken, exports.requireAdmi
     }
     return res.json(enriched);
 });
-// 2b. Delete a participant
+// 2b. Update a participant's profile
+router.put('/admin/participants/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const user = await db_1.Users.findOne({ id });
+    if (!user)
+        return res.status(404).json({ message: 'User not found' });
+    const { name, email, phone, college, branch, year, gender, linkedin, paymentStatus, amountPaid, role, tshirtSize, foodPreference } = req.body;
+    // If email is being changed, ensure it's not taken by someone else
+    if (email && email.toLowerCase().trim() !== user.email) {
+        const existing = await db_1.Users.findOne({ email: email.toLowerCase().trim() });
+        if (existing && existing.id !== id) {
+            return res.status(409).json({ message: `Email "${email}" is already used by another user.` });
+        }
+    }
+    const updates = {};
+    if (name !== undefined)
+        updates.name = name.trim();
+    if (email !== undefined)
+        updates.email = email.toLowerCase().trim();
+    if (phone !== undefined)
+        updates.phone = phone;
+    if (college !== undefined)
+        updates.college = college;
+    if (branch !== undefined)
+        updates.branch = branch;
+    if (year !== undefined)
+        updates.year = year;
+    if (gender !== undefined)
+        updates.gender = gender;
+    if (linkedin !== undefined)
+        updates.linkedin = linkedin;
+    if (paymentStatus !== undefined)
+        updates.paymentStatus = paymentStatus;
+    if (amountPaid !== undefined)
+        updates.amountPaid = Number(amountPaid);
+    if (role !== undefined)
+        updates.role = role;
+    if (tshirtSize !== undefined)
+        updates.tshirtSize = tshirtSize || undefined;
+    if (foodPreference !== undefined)
+        updates.foodPreference = foodPreference || undefined;
+    const updated = await db_1.Users.updateOne(id, updates);
+    if (!updated)
+        return res.status(500).json({ message: 'Failed to update user' });
+    return res.json({ success: true, message: `${updated.name} updated successfully.`, user: updated });
+});
+// 2c. Delete a participant
 router.delete('/admin/participants/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
     const { id } = req.params;
     const user = await db_1.Users.findOne({ id });
@@ -2271,6 +2502,129 @@ router.post('/admin/check-in', exports.authenticateToken, exports.requireAdmin, 
     });
     const updatedUser = await db_1.Users.findOne({ id: user.id });
     return res.json({ success: true, message: `${user.name} checked in successfully.`, user: updatedUser });
+});
+// 3b. Admin: Add registration (individual or team) directly
+router.post('/admin/add-registration', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { type, individual, team } = req.body;
+    if (!type || !['individual', 'team'].includes(type)) {
+        return res.status(400).json({ message: 'type must be "individual" or "team"' });
+    }
+    const timestamp = new Date().toISOString();
+    // ── Individual ──────────────────────────────────────────────────────────────
+    if (type === 'individual') {
+        const { name, email, phone, college, branch, year, gender, linkedin, paymentStatus, amountPaid } = individual || {};
+        if (!name || !email)
+            return res.status(400).json({ message: 'name and email are required for individual registration' });
+        const cleanEmail = email.toLowerCase().trim();
+        const existing = await db_1.Users.findOne({ email: cleanEmail });
+        if (existing)
+            return res.status(409).json({ message: `A user with email "${cleanEmail}" already exists.` });
+        const newUser = await db_1.Users.create({
+            name: name.trim(),
+            email: cleanEmail,
+            phone: phone || '9999999999',
+            college: college || '',
+            branch: branch || '',
+            year: year || '',
+            gender: gender || 'Not Specified',
+            linkedin: linkedin || 'https://linkedin.com',
+            role: 'participant',
+            paymentStatus: paymentStatus || 'paid',
+            amountPaid: Number(amountPaid) || 500,
+            teamRole: undefined,
+            teamId: undefined,
+            checkedIn: false,
+            createdAt: timestamp,
+        });
+        return res.json({ success: true, message: 'Individual participant added successfully.', user: newUser });
+    }
+    // ── Team ─────────────────────────────────────────────────────────────────────
+    if (type === 'team') {
+        const { teamName, college, branch, year, description, paymentStatus, amountPaid, leader, members } = team || {};
+        if (!teamName || !leader || !leader.name || !leader.email) {
+            return res.status(400).json({ message: 'teamName, leader.name, and leader.email are required' });
+        }
+        const leaderEmail = leader.email.toLowerCase().trim();
+        // Check/create leader
+        let leaderUser = await db_1.Users.findOne({ email: leaderEmail });
+        if (!leaderUser) {
+            leaderUser = await db_1.Users.create({
+                name: leader.name.trim(),
+                email: leaderEmail,
+                phone: leader.phone || '9999999999',
+                college: college || '',
+                branch: branch || '',
+                year: year || '',
+                gender: leader.gender || 'Not Specified',
+                linkedin: leader.linkedin || 'https://linkedin.com',
+                role: 'team-leader',
+                paymentStatus: paymentStatus || 'paid',
+                amountPaid: Number(amountPaid) || 500,
+                teamRole: 'leader',
+                checkedIn: false,
+                createdAt: timestamp,
+            });
+        }
+        else {
+            await db_1.Users.updateOne(leaderUser.id, { role: 'team-leader', teamRole: 'leader' });
+            leaderUser = (await db_1.Users.findOne({ id: leaderUser.id }));
+        }
+        // Check/create members
+        const memberIds = [leaderUser.id];
+        const memberList = Array.isArray(members) ? members : [];
+        for (const mem of memberList) {
+            if (!mem.email || !mem.name)
+                continue;
+            const memEmail = mem.email.toLowerCase().trim();
+            let memUser = await db_1.Users.findOne({ email: memEmail });
+            if (!memUser) {
+                memUser = await db_1.Users.create({
+                    name: mem.name.trim(),
+                    email: memEmail,
+                    phone: mem.phone || '9999999999',
+                    college: college || '',
+                    branch: branch || '',
+                    year: year || '',
+                    gender: mem.gender || 'Not Specified',
+                    linkedin: mem.linkedin || 'https://linkedin.com',
+                    role: 'participant',
+                    paymentStatus: paymentStatus || 'paid',
+                    amountPaid: Number(amountPaid) || 500,
+                    teamRole: 'member',
+                    checkedIn: false,
+                    createdAt: timestamp,
+                });
+            }
+            else {
+                await db_1.Users.updateOne(memUser.id, { role: 'participant', teamRole: 'member' });
+                memUser = (await db_1.Users.findOne({ id: memUser.id }));
+            }
+            memberIds.push(memUser.id);
+        }
+        // Create team
+        const totalMembers = memberIds.length;
+        const remainingSlots = Math.max(0, 5 - totalMembers);
+        const status = totalMembers >= 5 ? 'full' : 'open';
+        const slug = teamName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const inviteLink = `${FRONTEND_BASE_URL}/teams/join?teamId=${slug}`;
+        const newTeam = await db_1.Teams.create({
+            name: teamName.trim(),
+            description: description || `Team ${teamName} from ${college || 'Unknown College'}`,
+            college: college || '',
+            leaderId: leaderUser.id,
+            members: memberIds,
+            remainingSlots,
+            status,
+            inviteLink,
+            joinRequests: [],
+            createdAt: timestamp,
+        });
+        // Link all members to team
+        for (const uid of memberIds) {
+            await db_1.Users.updateOne(uid, { teamId: newTeam.id });
+        }
+        return res.json({ success: true, message: `Team "${teamName}" and ${memberIds.length} member(s) added successfully.`, team: newTeam });
+    }
 });
 // 4. Coupons listing (with usage count)
 router.get('/admin/coupons', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
@@ -2433,7 +2787,7 @@ router.get('/admin/export-csv', exports.authenticateToken, exports.requireAdmin,
     const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,RegistrationDate\n';
     const participantRows = users.map(u => {
         const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-        return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"http://localhost:3000","${u.createdAt}"`;
+        return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${FRONTEND_BASE_URL}","${u.createdAt}"`;
     }).join('\n');
     const csvContent = `================================================================================
 CODESPRINT 2026 — COMPREHENSIVE REGISTRATION & ANALYTICS REPORT
@@ -2711,7 +3065,234 @@ router.delete('/admin/coordinators/:id', exports.authenticateToken, exports.requ
 // ─── COLLEGES ROUTES ─────────────────────────────────────────────────────────
 router.get('/colleges', async (req, res) => {
     const colleges = await db_1.CollegesDb.find({});
+    colleges.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     res.json(colleges);
+});
+router.post('/public/colleges/ensure', async (req, res) => {
+    const { name } = req.body;
+    if (!name || !String(name).trim()) {
+        return res.status(400).json({ message: 'College name is required.' });
+    }
+    const savedName = await ensureCollegeExists(String(name));
+    return res.json({ success: true, name: savedName });
+});
+// A.0 — POST /api/admin/send-otp
+//   Body: { email: string }
+//   Sends 6-digit verification OTP code to authorised admin email
+router.post('/admin/send-otp', async (req, res) => {
+    const { email } = req.body;
+    if (!email || !String(email).trim()) {
+        return res.status(400).json({ message: 'Admin email address is required.' });
+    }
+    try {
+        const normalEmail = String(email).toLowerCase().trim();
+        // Check AdminAllowlist or Users DB with role === 'admin'
+        const allowed = await db_1.AdminAllowlist.findOne({ email: normalEmail });
+        const adminUser = await db_1.Users.findOne({ email: normalEmail, role: 'admin' });
+        if (!allowed && !adminUser && normalEmail !== 'admin@codesprint.com' && normalEmail !== 'admin@local.com') {
+            return res.status(403).json({ message: `Access denied. "${normalEmail}" is not an authorised admin email.` });
+        }
+        const recipientName = allowed?.name || adminUser?.name || normalEmail.split('@')[0];
+        // Invalidate old unused OTPs for this email
+        const existing = await db_1.OtpStore.find({ email: normalEmail });
+        for (const old of existing) {
+            await db_1.OtpStore.updateOne(old.id, { used: true });
+        }
+        // Generate 6-digit OTP code
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // +10 mins
+        await db_1.OtpStore.create({
+            email: normalEmail,
+            code,
+            expiresAt,
+            used: false,
+            createdAt: new Date().toISOString()
+        });
+        // Send Email via Transporter
+        const mailOptions = {
+            from: `"CodeSprint 2026 Admin" <${process.env.EMAIL_USER || 'administrator@audisankara.ac.in'}>`,
+            to: normalEmail,
+            subject: `CodeSprint 2026 — Admin Verification Code: ${code}`,
+            html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 24px; border: 1px solid #e4e4e7; border-radius: 12px; background: #ffffff;">
+          <h2 style="color: #6366f1; margin-top: 0;">Admin Control Panel Verification</h2>
+          <p>Hello <strong>${recipientName}</strong>,</p>
+          <p>Your one-time login verification code for CodeSprint 2026 Admin Control Panel is:</p>
+          <div style="font-size: 32px; font-weight: bold; letter-spacing: 6px; color: #18181b; background: #f4f4f5; padding: 16px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            ${code}
+          </div>
+          <p style="font-size: 13px; color: #71717a;">This code is valid for 10 minutes. Do not share this code with anyone.</p>
+        </div>
+      `
+        };
+        try {
+            await transporter.sendMail(mailOptions);
+        }
+        catch (mailErr) {
+            console.error('[Admin Send Mail Error]:', mailErr);
+        }
+        const [userPart, domainPart] = normalEmail.split('@');
+        const maskedUser = userPart.length > 2 ? `${userPart[0]}***${userPart[userPart.length - 1]}` : `${userPart[0]}***`;
+        const maskedEmail = `${maskedUser}@${domainPart}`;
+        return res.json({
+            success: true,
+            email: normalEmail,
+            maskedEmail,
+            name: recipientName,
+            message: `Verification code sent to ${maskedEmail}`
+        });
+    }
+    catch (err) {
+        console.error('[Admin Send OTP Error]:', err);
+        return res.status(500).json({ message: err.message || 'Failed to send verification OTP code.' });
+    }
+});
+// Admin: Add a new college manually
+router.post('/admin/colleges', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { name } = req.body;
+    if (!name || !String(name).trim()) {
+        return res.status(400).json({ message: 'College name is required.' });
+    }
+    const normalized = normalizeCollegeName(String(name).trim());
+    const existing = await db_1.CollegesDb.find({});
+    const exists = existing.find((c) => c.name.toLowerCase().trim() === normalized.toLowerCase());
+    if (exists) {
+        return res.status(400).json({ message: `College "${exists.name}" already exists.` });
+    }
+    const created = await db_1.CollegesDb.create({
+        id: `col_${(0, uuid_1.v4)()}`,
+        name: normalized,
+        createdAt: new Date().toISOString()
+    });
+    return res.status(201).json(created);
+});
+// Admin: Edit / Rename an existing college in DB (and cascade to users & teams)
+router.put('/admin/colleges/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name || !String(name).trim()) {
+        return res.status(400).json({ message: 'New college name is required.' });
+    }
+    const collegeDoc = await db_1.CollegesDb.findOne({ id });
+    if (!collegeDoc) {
+        return res.status(404).json({ message: 'College not found.' });
+    }
+    const oldName = collegeDoc.name;
+    const newName = normalizeCollegeName(String(name).trim());
+    // Update CollegesDb
+    const updated = await db_1.CollegesDb.updateOne(id, { name: newName });
+    // Cascade update all users with old college name
+    const usersToUpdate = await db_1.Users.find((u) => u.college && u.college.toLowerCase().trim() === oldName.toLowerCase().trim());
+    for (const u of usersToUpdate) {
+        await db_1.Users.updateOne(u.id, { college: newName });
+    }
+    // Cascade update all teams with old college name
+    const teamsToUpdate = await db_1.Teams.find((t) => t.college && t.college.toLowerCase().trim() === oldName.toLowerCase().trim());
+    for (const t of teamsToUpdate) {
+        await db_1.Teams.updateOne(t.id, { college: newName });
+    }
+    return res.json({ success: true, college: updated, updatedUsers: usersToUpdate.length, updatedTeams: teamsToUpdate.length });
+});
+// Admin: Delete a college from database
+router.delete('/admin/colleges/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const deleted = await db_1.CollegesDb.deleteOne(id);
+    if (!deleted) {
+        return res.status(404).json({ message: 'College not found.' });
+    }
+    return res.json({ success: true, message: 'College deleted successfully.' });
+});
+// Admin: Update college for a specific participant
+router.put('/admin/users/:id/college', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { college } = req.body;
+    if (!college || !String(college).trim()) {
+        return res.status(400).json({ message: 'College name is required.' });
+    }
+    const user = await db_1.Users.findOne({ id });
+    if (!user) {
+        return res.status(404).json({ message: 'User not found.' });
+    }
+    const normalized = await ensureCollegeExists(String(college));
+    await db_1.Users.updateOne(id, { college: normalized });
+    // If user is leader of a team, update team college as well
+    if (user.teamId && user.role === 'team-leader') {
+        await db_1.Teams.updateOne(user.teamId, { college: normalized });
+    }
+    const updatedUser = await db_1.Users.findOne({ id });
+    return res.json({ success: true, user: updatedUser });
+});
+// Admin: Update college for a specific team
+router.put('/admin/teams/:id/college', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { college } = req.body;
+    if (!college || !String(college).trim()) {
+        return res.status(400).json({ message: 'College name is required.' });
+    }
+    const team = await db_1.Teams.findOne({ id });
+    if (!team) {
+        return res.status(404).json({ message: 'Team not found.' });
+    }
+    const normalized = await ensureCollegeExists(String(college));
+    await db_1.Teams.updateOne(id, { college: normalized });
+    // Optionally update all team members' college
+    for (const memberId of team.members) {
+        await db_1.Users.updateOne(memberId, { college: normalized });
+    }
+    const updatedTeam = await db_1.Teams.findOne({ id });
+    return res.json({ success: true, team: updatedTeam });
+});
+router.post('/admin/colleges/cleanup', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    const allColleges = await db_1.CollegesDb.find({});
+    let cleanedCount = 0;
+    let mergedCount = 0;
+    const nameToIdMap = new Map();
+    for (const col of allColleges) {
+        const cleanName = normalizeCollegeName(col.name);
+        if (!cleanName || cleanName.length < 2) {
+            await db_1.CollegesDb.deleteOne(col.id);
+            cleanedCount++;
+            continue;
+        }
+        const lowerKey = cleanName.toLowerCase().trim();
+        if (nameToIdMap.has(lowerKey)) {
+            // Duplicate college: delete duplicate from CollegesDb
+            await db_1.CollegesDb.deleteOne(col.id);
+            mergedCount++;
+        }
+        else {
+            nameToIdMap.set(lowerKey, col.id);
+            if (col.name !== cleanName) {
+                await db_1.CollegesDb.updateOne(col.id, { name: cleanName });
+                cleanedCount++;
+            }
+        }
+    }
+    // Also clean up Users and Teams college names
+    const allUsers = await db_1.Users.find({});
+    for (const u of allUsers) {
+        if (u.college) {
+            const cleaned = normalizeCollegeName(u.college);
+            if (cleaned !== u.college) {
+                await db_1.Users.updateOne(u.id, { college: cleaned });
+            }
+        }
+    }
+    const allTeams = await db_1.Teams.find({});
+    for (const t of allTeams) {
+        if (t.college) {
+            const cleaned = normalizeCollegeName(t.college);
+            if (cleaned !== t.college) {
+                await db_1.Teams.updateOne(t.id, { college: cleaned });
+            }
+        }
+    }
+    const remaining = await db_1.CollegesDb.find({});
+    return res.json({
+        success: true,
+        message: `Database cleaned! Cleaned ${cleanedCount} entries and merged ${mergedCount} duplicates.`,
+        totalCollegesRemaining: remaining.length
+    });
 });
 router.post('/admin/colleges/upload', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
     const { csvContent } = req.body;
@@ -2720,27 +3301,23 @@ router.post('/admin/colleges/upload', exports.authenticateToken, exports.require
     // Load existing college names (case-insensitive dedup)
     const existing = await db_1.CollegesDb.find({});
     const existingNames = new Set(existing.map((c) => c.name.toLowerCase().trim()));
-    // Parse CSV (assuming 1 column for college name)
+    // Parse CSV
     const lines = csvContent.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     const added = [];
-    // Skip header if it says 'college' or 'name'
-    if (lines[0].toLowerCase().includes('college') || lines[0].toLowerCase().includes('name')) {
-        lines.shift();
-    }
     for (const line of lines) {
-        const name = line.replace(/(^"|"$)/g, '').trim(); // basic CSV quote stripping
-        if (name && !existingNames.has(name.toLowerCase())) {
+        const name = normalizeCollegeName(line);
+        if (name && name.length > 2 && !existingNames.has(name.toLowerCase())) {
             const col = await db_1.CollegesDb.create({
                 id: `col_${(0, uuid_1.v4)()}`,
                 name,
                 createdAt: new Date().toISOString()
             });
             added.push(col);
-            existingNames.add(name.toLowerCase()); // prevent intra-upload dupes too
+            existingNames.add(name.toLowerCase());
         }
     }
     const totalNow = existing.length + added.length;
-    res.json({ success: true, count: added.length, total: totalNow, message: `Added ${added.length} new college(s). Total: ${totalNow}.` });
+    return res.json({ success: true, count: added.length, total: totalNow, message: `Added ${added.length} clean college(s). Total: ${totalNow}.` });
 });
 // ─── PROBLEM STATEMENTS ROUTES ───────────────────────────────────────────────
 router.get('/problem-statements', exports.authenticateToken, async (req, res) => {
