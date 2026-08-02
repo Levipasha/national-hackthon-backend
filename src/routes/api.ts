@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
@@ -160,28 +161,42 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
 };
 
 const generateTeamId = async (): Promise<string> => {
-  let isUnique = false;
-  let teamId = '';
-  let attempts = 0;
+  try {
+    const CounterModel = mongoose.models.Counter || mongoose.model('Counter', new mongoose.Schema({
+      _id: { type: String, required: true },
+      seq: { type: Number, default: 750 }
+    }));
 
-  while (!isUnique && attempts < 1000) {
-    attempts++;
-    const randomNum = Math.floor(Math.random() * 999) + 1;
-    const formattedNum = String(randomNum).padStart(3, '0');
-    teamId = `CS2026-${formattedNum}`;
+    const counter = await CounterModel.findByIdAndUpdate(
+      'team_code_counter',
+      { $inc: { seq: 1 } },
+      { new: true, upsert: true }
+    );
 
-    const existing = await Teams.findOne({ id: teamId });
-    if (!existing) {
-      isUnique = true;
+    let formattedSeq = String(counter.seq).padStart(3, '0');
+    let teamId = `CS2026-${formattedSeq}`;
+
+    // Extra safety check in case the ID exists from historical manual data
+    let existing = await Teams.findOne({ id: teamId });
+    let safetyAttempts = 0;
+    while (existing && safetyAttempts < 100) {
+      safetyAttempts++;
+      const nextCounter = await CounterModel.findByIdAndUpdate(
+        'team_code_counter',
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true }
+      );
+      teamId = `CS2026-${String(nextCounter.seq).padStart(3, '0')}`;
+      existing = await Teams.findOne({ id: teamId });
     }
-  }
 
-  if (!isUnique) {
-    const randomNum = Math.floor(Math.random() * 9000) + 1000;
-    teamId = `CS2026-${randomNum}`;
+    return teamId;
+  } catch (err) {
+    console.error('Error generating atomic team ID, falling back to secure random entropy:', err);
+    const randomNum = Math.floor(100 + Math.random() * 900);
+    const randomHex = crypto.randomBytes(1).toString('hex').toUpperCase();
+    return `CS2026-${randomNum}${randomHex}`;
   }
-
-  return teamId;
 };
 
 const handleTeamPaymentSuccess = async (teamId: string, paymentId: string, totalAmountPaid: number, payerId?: string) => {
@@ -1102,10 +1117,18 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
       });
     }
 
+    // Include metadata notes so Razorpay server stores teamName and payer info directly inside the payment
+    const notes: Record<string, string> = {};
+    if (registrationType) notes.registrationType = String(registrationType);
+    if (email) notes.email = String(email);
+    if (req.body.teamName) notes.teamName = String(req.body.teamName);
+    if (req.body.phone) notes.phone = String(req.body.phone);
+
     const order = await razorpay.orders.create({
       amount: Math.round(expectedAmount * 100), // in paise
       currency: 'INR',
-      receipt: `receipt_${uuidv4().substring(0, 14)}`
+      receipt: `receipt_${uuidv4().substring(0, 14)}`,
+      notes
     });
 
     return res.json({
@@ -1131,6 +1154,20 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
 
   if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !registrationType || !registrationDetails) {
     return res.status(400).json({ message: 'Missing required parameters' });
+  }
+
+  // Idempotency check: Prevent duplicate processing if two requests arrive simultaneously for the same payment/order
+  const existingPayment = await Payments.findOne({
+    $or: [
+      { razorpayPaymentId: razorpay_payment_id },
+      { razorpayOrderId: razorpay_order_id }
+    ]
+  });
+  if (existingPayment) {
+    console.log(`[Payment] Idempotent hit: ${razorpay_payment_id} / ${razorpay_order_id} was already processed successfully.`);
+    const existingLeader = await Users.findOne({ id: existingPayment.userId });
+    const existingTeam = existingLeader?.teamId ? await Teams.findOne({ id: existingLeader.teamId }) : undefined;
+    return res.json({ success: true, message: 'Payment already processed', user: existingLeader, team: existingTeam });
   }
 
   // Verify Razorpay signature
@@ -1496,10 +1533,16 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       });
     }
 
+    const notes: Record<string, string> = {
+      userId: String(req.user?.id || ''),
+      userEmail: String(req.body.email || '')
+    };
+
     const order = await razorpay.orders.create({
       amount: Math.round(expectedAmount * 100), // in paise
       currency: 'INR',
-      receipt: `receipt_${uuidv4().substring(0, 14)}`
+      receipt: `receipt_${uuidv4().substring(0, 14)}`,
+      notes
     });
 
     return res.json({
@@ -1527,6 +1570,19 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
   if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
     return res.status(400).json({ message: 'Missing required Razorpay payment verification parameters' });
+  }
+
+  // Idempotency check: Prevent duplicate processing if payment already logged
+  const existingPayment = await Payments.findOne({
+    $or: [
+      { razorpayPaymentId: razorpay_payment_id },
+      { razorpayOrderId: razorpay_order_id }
+    ]
+  });
+  if (existingPayment) {
+    console.log(`[Payment] Idempotent hit for verify: ${razorpay_payment_id}`);
+    const existingUser = await Users.findOne({ id: userId });
+    return res.json({ success: true, message: 'Payment already processed', user: existingUser });
   }
 
   // Verify Razorpay signature (allow bypass for testing/development mode)
@@ -1665,6 +1721,46 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
 
   const updatedUser = await Users.findOne({ id: user.id });
   return res.json({ success: true, message: 'Payment completed successfully', user: updatedUser });
+});
+
+// 3. Razorpay Server-to-Server Webhook (Catches successful payments even if frontend browser crashes)
+router.post('/payments/webhook', async (req: Request, res: Response) => {
+  try {
+    const event = req.body;
+    if (event && event.event === 'payment.captured') {
+      const paymentEntity = event.payload?.payment?.entity;
+      if (paymentEntity) {
+        const paymentId = paymentEntity.id;
+        const orderId = paymentEntity.order_id;
+        const amount = paymentEntity.amount ? paymentEntity.amount / 100 : 0;
+        const email = paymentEntity.email;
+        const notes = paymentEntity.notes || {};
+
+        console.log(`[Razorpay Webhook] Payment Captured: ${paymentId} for Order: ${orderId}, Amount: ${amount}, Email: ${email}`);
+
+        // Check if payment is already logged in DB
+        const existingPayment = await Payments.findOne({ razorpayPaymentId: paymentId });
+        if (!existingPayment) {
+          // Log payment record automatically
+          await Payments.create({
+            razorpayPaymentId: paymentId,
+            razorpayOrderId: orderId,
+            userId: notes.userId || `u_webhook_${uuidv4().substring(0, 8)}`,
+            userName: notes.teamName ? `Team Leader (${notes.teamName})` : (notes.name || email),
+            userEmail: email || notes.email || 'unknown@payment.com',
+            amount: amount,
+            status: 'success',
+            createdAt: new Date().toISOString()
+          });
+          console.log(`[Razorpay Webhook] Successfully logged orphaned payment ${paymentId} to DB`);
+        }
+      }
+    }
+    return res.status(200).json({ status: 'ok' });
+  } catch (err) {
+    console.error('[Razorpay Webhook Error]:', err);
+    return res.status(200).json({ status: 'error_logged' });
+  }
 });
 
 
