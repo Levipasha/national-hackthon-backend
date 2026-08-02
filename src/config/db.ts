@@ -32,6 +32,7 @@ export interface User {
   checkedIn: boolean;
   checkInTime?: string;
   profileCompleted?: boolean;
+  collegeUpdatedByLeader?: boolean;
   createdAt: string;
 }
 

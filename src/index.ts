@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 import apiRouter from './routes/api';
 import { connectDatabase, seedDatabase } from './config/db';
 
+import { scheduleAug3Campaign } from './services/campaignService';
+
 dotenv.config();
 
 const app = express();
@@ -28,6 +30,7 @@ app.use(async (req, res, next) => {
       await connectDatabase();
       await seedDatabase();
       dbConnected = true;
+      scheduleAug3Campaign();
     } catch (err) {
       console.error('[DB] Connection failed:', err);
       return res.status(500).json({ message: 'Database connection error' });

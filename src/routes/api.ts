@@ -13,6 +13,15 @@ import {
   AdminAllowlistEntry, OtpRecord
 } from '../config/db';
 
+import { 
+  campaignStatus, 
+  sendCampaignMail1, 
+  sendCampaignMail2, 
+  getGuidelinesEmailTemplate, 
+  getWhatsAppEmailTemplate,
+  scheduleNewUserWelcomeSequence
+} from '../services/campaignService';
+
 dotenv.config();
 
 const router = Router();
@@ -1077,11 +1086,81 @@ router.post('/coupons/validate', async (req: Request, res: Response) => {
 
 // 0.1 Create Order Public (For signup registration before user is created in DB)
 router.post('/payments/create-order-public', async (req: Request, res: Response) => {
-  const { registrationType, quantity, couponCode, email, amount } = req.body;
+  const { registrationType, quantity, couponCode, email, amount, registrationDetails } = req.body;
   const count = Number(quantity) || 1;
   let expectedAmount = (amount !== undefined && !isNaN(Number(amount))) ? Number(amount) : count * 399;
 
   try {
+    // --- PRE-PAYMENT UNIQUNESS VALIDATION ---
+    // Prevent user from paying if details are already registered with a completed payment
+    const teamName = req.body.teamName || registrationDetails?.teamName;
+    
+    // Check all emails provided
+    let emailsToCheck: string[] = [];
+    if (Array.isArray(req.body.emails)) emailsToCheck.push(...req.body.emails);
+    if (email) emailsToCheck.push(email);
+    if (registrationDetails?.leader?.email) emailsToCheck.push(registrationDetails.leader.email);
+    if (Array.isArray(registrationDetails?.members)) {
+      emailsToCheck.push(...registrationDetails.members.map((m: any) => m.email));
+    }
+    if (registrationDetails?.email) emailsToCheck.push(registrationDetails.email);
+
+    emailsToCheck = Array.from(new Set(emailsToCheck.filter(Boolean).map(e => String(e).trim().toLowerCase())));
+
+    for (const em of emailsToCheck) {
+      const existing = await Users.findOne(u => u.email.toLowerCase() === em && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+      if (existing) {
+        return res.status(400).json({ message: `Email '${em}' is already registered with a completed payment.` });
+      }
+    }
+
+    // Check all phone numbers
+    let phonesToCheck: string[] = [];
+    if (Array.isArray(req.body.phones)) phonesToCheck.push(...req.body.phones);
+    if (req.body.phone) phonesToCheck.push(req.body.phone);
+    if (registrationDetails?.leader?.phone) phonesToCheck.push(registrationDetails.leader.phone);
+    if (Array.isArray(registrationDetails?.members)) {
+      phonesToCheck.push(...registrationDetails.members.map((m: any) => m.phone));
+    }
+    if (registrationDetails?.phone) phonesToCheck.push(registrationDetails.phone);
+
+    phonesToCheck = Array.from(new Set(phonesToCheck.filter(Boolean).map(p => String(p).trim())));
+
+    for (const ph of phonesToCheck) {
+      const existing = await Users.findOne(u => u.phone === ph && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+      if (existing) {
+        return res.status(400).json({ message: `Phone number '${ph}' is already registered with a completed payment.` });
+      }
+    }
+
+    // Check all roll numbers
+    let rollsToCheck: string[] = [];
+    if (Array.isArray(req.body.rolls)) rollsToCheck.push(...req.body.rolls);
+    if (req.body.rollNumber) rollsToCheck.push(req.body.rollNumber);
+    if (registrationDetails?.leader?.rollNumber) rollsToCheck.push(registrationDetails.leader.rollNumber);
+    if (Array.isArray(registrationDetails?.members)) {
+      rollsToCheck.push(...registrationDetails.members.map((m: any) => m.rollNumber));
+    }
+    if (registrationDetails?.rollNumber) rollsToCheck.push(registrationDetails.rollNumber);
+
+    rollsToCheck = Array.from(new Set(rollsToCheck.filter(Boolean).map(r => String(r).trim().toUpperCase())));
+
+    for (const roll of rollsToCheck) {
+      const existing = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === roll && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
+      if (existing) {
+        return res.status(400).json({ message: `Roll/ID number '${roll}' is already registered with a completed payment.` });
+      }
+    }
+
+    // Check team name
+    if (teamName) {
+      const cleanTeamName = String(teamName).trim();
+      const existingTeam = await Teams.findOne(t => t.name.toLowerCase() === cleanTeamName.toLowerCase());
+      if (existingTeam) {
+        return res.status(400).json({ message: `Team Name '${cleanTeamName}' is already taken.` });
+      }
+    }
+
     if (couponCode) {
       const coupon = await Coupons.findOne({ code: couponCode.toUpperCase() });
       if (coupon && coupon.isActive && new Date(coupon.expiryDate).getTime() > Date.now() && coupon.usageCount < coupon.usageLimit) {
@@ -1121,7 +1200,7 @@ router.post('/payments/create-order-public', async (req: Request, res: Response)
     const notes: Record<string, string> = {};
     if (registrationType) notes.registrationType = String(registrationType);
     if (email) notes.email = String(email);
-    if (req.body.teamName) notes.teamName = String(req.body.teamName);
+    if (teamName) notes.teamName = String(teamName);
     if (req.body.phone) notes.phone = String(req.body.phone);
 
     const order = await razorpay.orders.create({
@@ -1210,29 +1289,14 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         }
       }
 
-      // Uniqueness checks (only block if user has a paid or submitted registration)
-      const allEmails = [leader.email, ...members.map((m: any) => m.email)].map(e => String(e).trim().toLowerCase());
-      for (const email of allEmails) {
-        const existingUser = await Users.findOne(u => u.email.toLowerCase() === email && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
-        if (existingUser) return res.status(400).json({ message: `Email ${email} is already registered with a completed payment.` });
-      }
-
-      const allRolls = [leader.rollNumber, ...members.map((m: any) => m.rollNumber)].map(r => String(r).trim().toUpperCase());
-      for (const roll of allRolls) {
-        if (roll) {
-          const existingRoll = await Users.findOne(u => String(u.rollNumber || '').trim().toUpperCase() === roll && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
-          if (existingRoll) return res.status(400).json({ message: `Roll/ID number ${roll} is already registered with a completed payment.` });
-        }
-      }
-
-      const allPhones = [leader.phone, ...members.map((m: any) => m.phone)].map(p => String(p).trim());
-      for (const phone of allPhones) {
-        const existingPhone = await Users.findOne(u => u.phone === phone && (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
-        if (existingPhone) return res.status(400).json({ message: `Phone number ${phone} is already registered with a completed payment.` });
-      }
-
+      // Post-payment conflict resolution: Money has been captured.
+      // Auto-resolve team name collisions gracefully instead of throwing 400
+      let finalTeamName = cleanTeamName;
       const existingName = await Teams.findOne(t => t.name.toLowerCase() === cleanTeamName.toLowerCase());
-      if (existingName) return res.status(400).json({ message: 'Team Name is already taken.' });
+      if (existingName) {
+        finalTeamName = `${cleanTeamName}_${Math.floor(1000 + Math.random() * 9000)}`;
+        console.log(`[Payment Auto-Resolve] Team name '${cleanTeamName}' was taken during payment. Auto-assigned name '${finalTeamName}'.`);
+      }
 
       let finalTeamCode = cleanTeamCode;
       const existingCode = await Teams.findOne(t => t.id.toLowerCase() === cleanTeamCode.toLowerCase());
@@ -1333,7 +1397,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
       const allTeamMembers = [leaderUser.id, ...memberIds];
       const team = await Teams.create({
         id: finalTeamCode,
-        name: cleanTeamName,
+        name: finalTeamName,
         description: 'Created during team registration.',
         college: leader.college,
         leaderId: leaderUser.id,
@@ -1709,6 +1773,42 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
     console.error('Failed to send registration confirmation email:', err);
   }
 
+  // Schedule automated drip (Stage 2: +2 min Guidelines PDF, Stage 3: +10 min gap WhatsApp Link)
+  try {
+    // Stage 1 registration confirmation email was sent above; schedule Stage 2 and Stage 3
+    setTimeout(async () => {
+      try {
+        const t2 = getGuidelinesEmailTemplate(user.name);
+        await transporter.sendMail({
+          from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+          to: user.email,
+          subject: t2.subject,
+          html: t2.html
+        });
+        console.log(`[Drip] Stage 2 (Guidelines PDF) sent to ${user.email} after 2 min delay.`);
+      } catch (err) {
+        console.error(`[Drip Error] Stage 2 to ${user.email}:`, err);
+      }
+    }, 2 * 60 * 1000);
+
+    setTimeout(async () => {
+      try {
+        const t3 = getWhatsAppEmailTemplate(user.name);
+        await transporter.sendMail({
+          from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+          to: user.email,
+          subject: t3.subject,
+          html: t3.html
+        });
+        console.log(`[Drip] Stage 3 (WhatsApp Group) sent to ${user.email} after 10 min gap.`);
+      } catch (err) {
+        console.error(`[Drip Error] Stage 3 to ${user.email}:`, err);
+      }
+    }, 12 * 60 * 1000);
+  } catch (dripErr) {
+    console.error('[Drip Schedule Error]:', dripErr);
+  }
+
   const updatedUser = await Users.findOne({ id: user.id });
   return res.json({ success: true, message: 'Payment completed successfully', user: updatedUser });
 });
@@ -1954,6 +2054,21 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       paymentStatus: 'pending' as const,
       createdAt: new Date().toISOString()
     });
+
+    // Trigger 3-stage automated email drip (Immediate Registration, +2 min Guidelines PDF, +10 min gap WhatsApp Link)
+    try {
+      if (leaderUser) {
+        scheduleNewUserWelcomeSequence(leaderUser);
+      }
+      for (const mId of memberIds) {
+        const mUser = await Users.findOne({ id: mId });
+        if (mUser) {
+          scheduleNewUserWelcomeSequence(mUser);
+        }
+      }
+    } catch (dripErr) {
+      console.error('[Register Team Flow Drip Error]:', dripErr);
+    }
 
     const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ success: true, token, user: leaderUser, team });
@@ -2435,6 +2550,63 @@ router.post('/teams/respond-request', authenticateToken, async (req: AuthRequest
 
   const updatedTeam = await Teams.findOne({ id: teamId });
   return res.json({ success: true, team: updatedTeam });
+});
+
+// Update User / Member College (One-time edit for Solo users and Team Leaders)
+router.post(['/users/update-college', '/teams/update-member-college'], authenticateToken, async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { targetUserId, newCollege } = req.body;
+  const targetId = targetUserId || userId;
+
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+  if (!newCollege || !String(newCollege).trim()) {
+    return res.status(400).json({ message: 'Please provide a valid college name.' });
+  }
+
+  const targetUser = await Users.findOne({ id: targetId });
+  if (!targetUser) return res.status(404).json({ message: 'User not found' });
+
+  // Authorization check: User editing self, or Leader editing team member
+  let isAllowed = targetId === userId;
+  if (!isAllowed && targetUser.teamId) {
+    const team = await Teams.findOne({ id: targetUser.teamId });
+    if (team && team.leaderId === userId) {
+      isAllowed = true;
+    }
+  }
+
+  if (!isAllowed) {
+    return res.status(403).json({ message: 'You do not have permission to update this user college.' });
+  }
+
+  // Check one-time edit limit
+  if (targetUser.collegeUpdatedByLeader || (targetUser as any).collegeUpdated) {
+    return res.status(400).json({ message: 'College name can only be edited once.' });
+  }
+
+  // Normalize and auto-save new college to CollegesDb
+  const normCollege = await ensureCollegeExists(String(newCollege).trim());
+
+  // Update user in DB
+  await Users.updateOne(targetUser.id, {
+    college: normCollege,
+    collegeUpdatedByLeader: true,
+    collegeUpdated: true
+  } as any);
+
+  // If this user is a team leader, update team's college as well
+  if (targetUser.teamId) {
+    const team = await Teams.findOne({ id: targetUser.teamId });
+    if (team && team.leaderId === targetUser.id) {
+      await Teams.updateOne(team.id, { college: normCollege });
+    }
+  }
+
+  return res.json({
+    success: true,
+    message: 'College name updated successfully.',
+    college: normCollege
+  });
 });
 
 // 4. Remove Team Member / Leave Team
