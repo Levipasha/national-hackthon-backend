@@ -1157,12 +1157,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
   }
 
   // Idempotency check: Prevent duplicate processing if two requests arrive simultaneously for the same payment/order
-  const existingPayment = await Payments.findOne({
-    $or: [
-      { razorpayPaymentId: razorpay_payment_id },
-      { razorpayOrderId: razorpay_order_id }
-    ]
-  });
+  const existingPayment = await Payments.findOne(p => p.razorpayPaymentId === razorpay_payment_id || p.razorpayOrderId === razorpay_order_id);
   if (existingPayment) {
     console.log(`[Payment] Idempotent hit: ${razorpay_payment_id} / ${razorpay_order_id} was already processed successfully.`);
     const existingLeader = await Users.findOne({ id: existingPayment.userId });
@@ -1573,12 +1568,7 @@ router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res:
   }
 
   // Idempotency check: Prevent duplicate processing if payment already logged
-  const existingPayment = await Payments.findOne({
-    $or: [
-      { razorpayPaymentId: razorpay_payment_id },
-      { razorpayOrderId: razorpay_order_id }
-    ]
-  });
+  const existingPayment = await Payments.findOne(p => p.razorpayPaymentId === razorpay_payment_id || p.razorpayOrderId === razorpay_order_id);
   if (existingPayment) {
     console.log(`[Payment] Idempotent hit for verify: ${razorpay_payment_id}`);
     const existingUser = await Users.findOne({ id: userId });
