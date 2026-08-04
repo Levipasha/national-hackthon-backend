@@ -33,6 +33,19 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || process.env.key_secret || ''
 });
 
+// Registration Cutoff: Wednesday, August 5, 2026 at 11:59:59 PM IST (Midnight)
+export const REGISTRATION_DEADLINE = new Date('2026-08-05T23:59:59+05:30').getTime();
+// 15-minute grace period for verifying payments already in-flight before midnight
+export const VERIFICATION_GRACE_DEADLINE = new Date('2026-08-06T00:15:00+05:30').getTime();
+
+export function isRegistrationClosed(): boolean {
+  return Date.now() >= REGISTRATION_DEADLINE;
+}
+
+export function isVerificationClosed(): boolean {
+  return Date.now() >= VERIFICATION_GRACE_DEADLINE;
+}
+
 /**
  * Normalizes college names to strip raw CSV quotes, numbers, IDs, and type prefixes ("Private", "State", "Deemed"), mapping typos and casing to clean canonical college names.
  */
@@ -117,6 +130,10 @@ export async function ensureCollegeExists(rawName: string): Promise<string> {
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
+  pool: true,
+  maxConnections: 1,
+  maxMessages: 100,
+  rateLimit: 1,
   auth: {
     user: process.env.EMAIL_USER || '',
     pass: process.env.EMAIL_PASS || ''
@@ -1548,6 +1565,10 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
 
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', authenticateToken, async (req: AuthRequest, res: Response) => {
+  if (isRegistrationClosed()) {
+    return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+  }
+
   let expectedAmount = 399;
   try {
     const user = await Users.findOne({ id: req.user!.id });
@@ -1592,9 +1613,11 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
       });
     }
 
+    const userForNotes = await Users.findOne({ id: req.user?.id });
     const notes: Record<string, string> = {
       userId: String(req.user?.id || ''),
-      userEmail: String(req.body.email || '')
+      userEmail: String(req.body.email || userForNotes?.email || ''),
+      teamId: String(userForNotes?.teamId || req.body.teamId || '')
     };
 
     const order = await razorpay.orders.create({
@@ -1623,6 +1646,10 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
 
 // 2. Capture and Verify Payment (Real Razorpay Verification)
 router.post('/payments/verify', authenticateToken, async (req: AuthRequest, res: Response) => {
+  if (isVerificationClosed()) {
+    return res.status(403).json({ message: 'The payment verification grace window has closed.' });
+  }
+
   const { razorpay_payment_id, razorpay_order_id, razorpay_signature, couponCode, amount } = req.body;
   const userId = req.user?.id;
 
@@ -1828,10 +1855,9 @@ router.post('/payments/webhook', async (req: Request, res: Response) => {
 
         console.log(`[Razorpay Webhook] Payment Captured: ${paymentId} for Order: ${orderId}, Amount: ${amount}, Email: ${email}`);
 
-        // Check if payment is already logged in DB
+        // 1. Check if payment is already logged in Payments DB
         const existingPayment = await Payments.findOne({ razorpayPaymentId: paymentId });
         if (!existingPayment) {
-          // Log payment record automatically
           await Payments.create({
             razorpayPaymentId: paymentId,
             razorpayOrderId: orderId,
@@ -1842,7 +1868,49 @@ router.post('/payments/webhook', async (req: Request, res: Response) => {
             status: 'success',
             createdAt: new Date().toISOString()
           });
-          console.log(`[Razorpay Webhook] Successfully logged orphaned payment ${paymentId} to DB`);
+          console.log(`[Razorpay Webhook] Successfully logged payment ${paymentId} to Payments DB`);
+        }
+
+        // 2. Find and update User & Team DB records to ensure user data is never missing/unpaid
+        let targetUser = null;
+        if (notes.userId) {
+          targetUser = await Users.findOne({ id: notes.userId });
+        }
+        if (!targetUser && (email || notes.userEmail)) {
+          const userEmailToFind = (email || notes.userEmail).toLowerCase().trim();
+          targetUser = await Users.findOne(u => u.email.toLowerCase().trim() === userEmailToFind);
+        }
+
+        if (targetUser) {
+          // Update User Payment Status
+          await Users.updateOne(targetUser.id, {
+            paymentStatus: 'paid',
+            paymentId: paymentId,
+            amountPaid: (targetUser.amountPaid || 0) > 0 ? targetUser.amountPaid : amount
+          });
+          console.log(`[Razorpay Webhook] Updated User '${targetUser.name}' (${targetUser.id}) to paymentStatus: paid`);
+
+          // Update Team Payment Status if user belongs to a team
+          const teamIdToUpdate = targetUser.teamId || notes.teamId;
+          if (teamIdToUpdate) {
+            const team = await Teams.findOne({ id: teamIdToUpdate });
+            if (team) {
+              await Teams.updateOne(team.id, { paymentStatus: 'paid' });
+              // Mark all team members as paid
+              const teamMembers = await Users.find(u => u.teamId === team.id);
+              for (const member of teamMembers) {
+                if (member.paymentStatus !== 'paid') {
+                  await Users.updateOne(member.id, {
+                    paymentStatus: 'paid',
+                    paymentId: paymentId
+                  });
+                }
+              }
+              console.log(`[Razorpay Webhook] Updated Team '${team.name}' (${team.id}) and its members to paymentStatus: paid`);
+            }
+          }
+        } else {
+          console.warn(`[Razorpay Webhook Warning] Payment captured but no matching user found for email '${email}' or userId '${notes.userId}'`);
         }
       }
     }
@@ -1880,6 +1948,10 @@ router.get('/teams/validate-unique', async (req: Request, res: Response) => {
 
 // Register Team Flow (creates team + leader + members in pending state)
 router.post('/teams/register-team-flow', async (req: Request, res: Response) => {
+  if (isRegistrationClosed()) {
+    return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+  }
+
   const { teamName, teamCode, leader, members, teamStatus, availableSlots } = req.body;
 
   if (!teamName || !teamCode || !leader || !members || !Array.isArray(members)) {
@@ -2744,8 +2816,9 @@ router.get('/teams/my-team', authenticateToken, async (req: AuthRequest, res: Re
 
 // --- ADMIN ENDPOINTS (ADMIN ROLE ONLY) ---
 
-// 1. Get Live Admin stats
-router.get('/admin/stats', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+// 1. Get Live Admin stats (alias /admin/overview avoids ad-blocker filters on '/stats')
+router.get(['/admin/stats', '/admin/overview'], authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+
   const allUsers = await Users.find();
   const allTeams = await Teams.find();
   const allPayments = await Payments.find();
