@@ -8,6 +8,10 @@ const FRONTEND_BASE_URL = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.sp
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
+  pool: true,
+  maxConnections: 1,
+  maxMessages: 100,
+  rateLimit: 1,
   auth: {
     user: process.env.EMAIL_USER || '',
     pass: process.env.EMAIL_PASS || ''
@@ -263,6 +267,8 @@ export async function sendCampaignMail1(): Promise<{ sentCount: number; failedCo
       });
       sentCampaignLogs[logKey] = true;
       sentCount++;
+      // Wait 1 second between email sends to prevent hitting SMTP rate limits
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (err) {
       console.error(`[Campaign Mail 1 Error] Failed to send to ${user.email}:`, err);
       failedCount++;
@@ -301,6 +307,8 @@ export async function sendCampaignMail2(): Promise<{ sentCount: number; failedCo
       });
       sentCampaignLogs[logKey] = true;
       sentCount++;
+      // Wait 1 second between email sends to prevent hitting SMTP rate limits
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (err) {
       console.error(`[Campaign Mail 2 Error] Failed to send to ${user.email}:`, err);
       failedCount++;

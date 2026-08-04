@@ -29,5 +29,101 @@
     "joinRequests": [],
     "createdAt": "2026-07-11T04:55:30.289Z",
     "id": "9e9fuxne7"
+  },
+  {
+    "id": "CS2026-516",
+    "name": "code hackers",
+    "description": "Created during team registration.",
+    "college": "MVR college of engineering and technology",
+    "leaderId": "u_i28vfka",
+    "members": [
+      "u_i28vfka",
+      "u_xcrv4lv",
+      "u_tgvlgnf",
+      "u_5671dwr",
+      "u_1nwtdfu"
+    ],
+    "memberCount": 5,
+    "remainingSlots": 0,
+    "paidSlots": 5,
+    "availableSlots": 0,
+    "teamStatus": "CLOSED",
+    "status": "full",
+    "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-516",
+    "joinRequests": [],
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-04T09:16:41.102Z"
+  },
+  {
+    "id": "CS2026-657",
+    "name": "A4MP-REDDY",
+    "description": "Group created for solo participants.",
+    "college": "Narayana Engineering College",
+    "leaderId": "u_erebi73",
+    "members": [
+      "u_erebi73",
+      "u_k9199gr",
+      "u_wjpplau"
+    ],
+    "memberCount": 3,
+    "remainingSlots": 2,
+    "paidSlots": 3,
+    "availableSlots": 2,
+    "teamStatus": "OPEN",
+    "status": "open",
+    "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-657",
+    "joinRequests": [],
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-04T14:47:36.423Z"
+  },
+  {
+    "id": "CS2026-660",
+    "_id": "6a71fcafcbb11ef32381b69d",
+    "name": "Neural Nexus",
+    "description": "Created during team registration.",
+    "college": "CREC",
+    "leaderId": "u_l1t50b3",
+    "members": [
+      "u_l1t50b3",
+      "u_rqzmm56",
+      "u_990nsnd",
+      "u_shvufbr",
+      "u_8a9dbb7"
+    ],
+    "memberCount": 5,
+    "remainingSlots": 0,
+    "paidSlots": 5,
+    "availableSlots": 0,
+    "teamStatus": "CLOSED",
+    "status": "full",
+    "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-660",
+    "joinRequests": [],
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-03T18:56:00.000Z",
+    "__v": 0
+  },
+  {
+    "id": "CS2026-676",
+    "_id": "6a72008180b219af0b18371e",
+    "name": "Bro Code",
+    "description": "Created during team registration.",
+    "college": "MOTHER THERESA INSTITUTE OF ENGINEERING AND TECHNOLOGY",
+    "leaderId": "u_tklko7m",
+    "members": [
+      "u_tklko7m",
+      "u_xmgel4c",
+      "u_ydgf6jw"
+    ],
+    "memberCount": 3,
+    "remainingSlots": 2,
+    "paidSlots": 3,
+    "availableSlots": 2,
+    "teamStatus": "OPEN",
+    "status": "open",
+    "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-676",
+    "joinRequests": [],
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-04T13:20:11.000Z",
+    "__v": 0
   }
 ]

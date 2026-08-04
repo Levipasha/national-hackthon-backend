@@ -2818,86 +2818,99 @@ router.get('/teams/my-team', authenticateToken, async (req: AuthRequest, res: Re
 
 // 1. Get Live Admin stats (alias /admin/overview avoids ad-blocker filters on '/stats')
 router.get(['/admin/stats', '/admin/overview'], authenticateToken, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const allUsers = (await Users.find()) || [];
+    const allTeams = (await Teams.find()) || [];
+    const allPayments = (await Payments.find()) || [];
+    const allVisitors = (await VisitorLogs.find()) || [];
 
-  const allUsers = await Users.find();
-  const allTeams = await Teams.find();
-  const allPayments = await Payments.find();
-  const allVisitors = await VisitorLogs.find();
+    const totalRegistrations = allUsers.filter(u => u && u.role !== 'admin').length;
+    const paidParticipants = allUsers.filter(u => u && u.paymentStatus === 'paid' && u.role !== 'admin').length;
+    const pendingPayments = allUsers.filter(u => u && u.paymentStatus === 'pending' && u.role !== 'admin').length;
+    const submittedPayments = allUsers.filter(u => u && u.paymentStatus === 'submitted' && u.role !== 'admin').length;
+    const rejectedPayments = allUsers.filter(u => u && u.paymentStatus === 'rejected' && u.role !== 'admin').length;
+    const totalTeams = allTeams.length;
+    const checkedInCount = allUsers.filter(u => u && u.checkedIn && u.role !== 'admin').length;
+    
+    // Calculate unique visitors & pageviews
+    const uniqueVisitorsCount = allVisitors.length;
+    const totalPageViews = allVisitors.reduce((sum, v) => sum + (v?.visitCount || 1), 0);
+    const recentVisitorLogs = [...allVisitors]
+      .sort((a, b) => new Date(b?.lastVisitedAt || 0).getTime() - new Date(a?.lastVisitedAt || 0).getTime())
+      .slice(0, 50);
 
-  const totalRegistrations = allUsers.filter(u => u.role !== 'admin').length;
-  const paidParticipants = allUsers.filter(u => u.paymentStatus === 'paid' && u.role !== 'admin').length;
-  const pendingPayments = allUsers.filter(u => u.paymentStatus === 'pending' && u.role !== 'admin').length;
-  const submittedPayments = allUsers.filter(u => u.paymentStatus === 'submitted' && u.role !== 'admin').length;
-  const rejectedPayments = allUsers.filter(u => u.paymentStatus === 'rejected' && u.role !== 'admin').length;
-  const totalTeams = allTeams.length;
-  const checkedInCount = allUsers.filter(u => u.checkedIn && u.role !== 'admin').length;
-  
-  // Calculate unique visitors & pageviews
-  const uniqueVisitorsCount = allVisitors.length;
-  const totalPageViews = allVisitors.reduce((sum, v) => sum + (v.visitCount || 1), 0);
-  const recentVisitorLogs = [...allVisitors]
-    .sort((a, b) => new Date(b.lastVisitedAt || 0).getTime() - new Date(a.lastVisitedAt || 0).getTime())
-    .slice(0, 50);
+    // Calculate total revenue
+    const totalRevenue = allPayments
+      .filter(p => p && p.status === 'success')
+      .reduce((sum, p) => sum + (p?.amount || 0), 0);
 
-  // Calculate total revenue
-  const totalRevenue = allPayments
-    .filter(p => p.status === 'success')
-    .reduce((sum, p) => sum + p.amount, 0);
+    // College count (non-admin paid participants with normalization)
+    const collegeCounts: { [key: string]: number } = {};
+    allUsers
+      .filter(u => u && u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn))
+      .forEach(u => {
+        if (u && u.college) {
+          const canonical = normalizeCollegeName(u.college);
+          if (canonical) {
+            collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+          }
+        }
+      });
 
-  // College count (non-admin paid participants with normalization)
-  const collegeCounts: { [key: string]: number } = {};
-  allUsers
-    .filter(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn))
-    .forEach(u => {
-      if (u.college) {
-        const canonical = normalizeCollegeName(u.college);
-        collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+    const collegesParticipating = Object.keys(collegeCounts).length;
+
+    // Daily registration chart data (Group by date over last 7 days + registration dates)
+    const registrationsByDate: { [key: string]: number } = {};
+    
+    // Pre-fill past 7 days with 0 count
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateKey = d.toISOString().split('T')[0];
+      registrationsByDate[dateKey] = 0;
+    }
+
+    allUsers.forEach(u => {
+      if (!u || u.role === 'admin') return;
+      if (u.paymentStatus !== 'paid' && !u.checkedIn) return;
+      let dateStr = 'Unknown';
+      if (u.createdAt) {
+        if (typeof u.createdAt === 'string') {
+          dateStr = u.createdAt.split('T')[0];
+        } else if ((u.createdAt as any) instanceof Date) {
+          dateStr = (u.createdAt as any).toISOString().split('T')[0];
+        }
+      }
+      if (dateStr !== 'Unknown') {
+        registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
       }
     });
 
-  const collegesParticipating = Object.keys(collegeCounts).length;
+    const liveRegistrationsGraph = Object.keys(registrationsByDate).map(date => ({
+      date,
+      count: registrationsByDate[date]
+    })).sort((a, b) => a.date.localeCompare(b.date));
 
-  // Daily registration chart data (Group by date over last 7 days + registration dates)
-  const registrationsByDate: { [key: string]: number } = {};
-  
-  // Pre-fill past 7 days with 0 count
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    const dateKey = d.toISOString().split('T')[0];
-    registrationsByDate[dateKey] = 0;
+    return res.json({
+      totalRegistrations,
+      paidParticipants,
+      pendingPayments,
+      submittedPayments,
+      rejectedPayments,
+      totalTeams,
+      totalRevenue,
+      checkedInCount,
+      collegesParticipating,
+      collegeDistribution: collegeCounts,
+      liveRegistrationsGraph,
+      uniqueVisitorsCount,
+      totalPageViews,
+      visitorLogs: recentVisitorLogs
+    });
+  } catch (err: any) {
+    console.error('[Admin Stats Error]:', err);
+    return res.status(500).json({ message: err?.message || 'Internal server error while compiling stats.' });
   }
-
-  allUsers.forEach(u => {
-    if (u.role === 'admin') return;
-    if (u.paymentStatus !== 'paid' && !u.checkedIn) return;
-    const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
-    if (dateStr !== 'Unknown') {
-      registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
-    }
-  });
-
-  const liveRegistrationsGraph = Object.keys(registrationsByDate).map(date => ({
-    date,
-    count: registrationsByDate[date]
-  })).sort((a, b) => a.date.localeCompare(b.date));
-
-  return res.json({
-    totalRegistrations,
-    paidParticipants,
-    pendingPayments,
-    submittedPayments,
-    rejectedPayments,
-    totalTeams,
-    totalRevenue,
-    checkedInCount,
-    collegesParticipating,
-    collegeDistribution: collegeCounts,
-    liveRegistrationsGraph,
-    uniqueVisitorsCount,
-    totalPageViews,
-    visitorLogs: recentVisitorLogs
-  });
 });
 
 // Track Unique Visit by IP / User ID

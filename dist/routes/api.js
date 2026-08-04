@@ -3,7 +3,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.requireAdmin = exports.authenticateToken = void 0;
+exports.requireAdmin = exports.authenticateToken = exports.VERIFICATION_GRACE_DEADLINE = exports.REGISTRATION_DEADLINE = void 0;
+exports.isRegistrationClosed = isRegistrationClosed;
+exports.isVerificationClosed = isVerificationClosed;
 exports.normalizeCollegeName = normalizeCollegeName;
 exports.ensureCollegeExists = ensureCollegeExists;
 const express_1 = require("express");
@@ -24,6 +26,16 @@ const razorpay = new razorpay_1.default({
     key_id: process.env.RAZORPAY_KEY_ID || process.env.key_id || '',
     key_secret: process.env.RAZORPAY_KEY_SECRET || process.env.key_secret || ''
 });
+// Registration Cutoff: Wednesday, August 5, 2026 at 11:59:59 PM IST (Midnight)
+exports.REGISTRATION_DEADLINE = new Date('2026-08-05T23:59:59+05:30').getTime();
+// 15-minute grace period for verifying payments already in-flight before midnight
+exports.VERIFICATION_GRACE_DEADLINE = new Date('2026-08-06T00:15:00+05:30').getTime();
+function isRegistrationClosed() {
+    return Date.now() >= exports.REGISTRATION_DEADLINE;
+}
+function isVerificationClosed() {
+    return Date.now() >= exports.VERIFICATION_GRACE_DEADLINE;
+}
 /**
  * Normalizes college names to strip raw CSV quotes, numbers, IDs, and type prefixes ("Private", "State", "Deemed"), mapping typos and casing to clean canonical college names.
  */
@@ -99,6 +111,10 @@ async function ensureCollegeExists(rawName) {
 }
 const transporter = nodemailer_1.default.createTransport({
     service: 'gmail',
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 100,
+    rateLimit: 1,
     auth: {
         user: process.env.EMAIL_USER || '',
         pass: process.env.EMAIL_PASS || ''
@@ -1357,6 +1373,9 @@ router.post('/payments/verify-and-register', async (req, res) => {
 });
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', exports.authenticateToken, async (req, res) => {
+    if (isRegistrationClosed()) {
+        return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+    }
     let expectedAmount = 399;
     try {
         const user = await db_1.Users.findOne({ id: req.user.id });
@@ -1399,9 +1418,11 @@ router.post('/payments/create-order', exports.authenticateToken, async (req, res
                 keyId: 'mock_key_id'
             });
         }
+        const userForNotes = await db_1.Users.findOne({ id: req.user?.id });
         const notes = {
             userId: String(req.user?.id || ''),
-            userEmail: String(req.body.email || '')
+            userEmail: String(req.body.email || userForNotes?.email || ''),
+            teamId: String(userForNotes?.teamId || req.body.teamId || '')
         };
         const order = await razorpay.orders.create({
             amount: Math.round(expectedAmount * 100), // in paise
@@ -1428,6 +1449,9 @@ router.post('/payments/create-order', exports.authenticateToken, async (req, res
 });
 // 2. Capture and Verify Payment (Real Razorpay Verification)
 router.post('/payments/verify', exports.authenticateToken, async (req, res) => {
+    if (isVerificationClosed()) {
+        return res.status(403).json({ message: 'The payment verification grace window has closed.' });
+    }
     const { razorpay_payment_id, razorpay_order_id, razorpay_signature, couponCode, amount } = req.body;
     const userId = req.user?.id;
     if (!userId)
@@ -1623,10 +1647,9 @@ router.post('/payments/webhook', async (req, res) => {
                 const email = paymentEntity.email;
                 const notes = paymentEntity.notes || {};
                 console.log(`[Razorpay Webhook] Payment Captured: ${paymentId} for Order: ${orderId}, Amount: ${amount}, Email: ${email}`);
-                // Check if payment is already logged in DB
+                // 1. Check if payment is already logged in Payments DB
                 const existingPayment = await db_1.Payments.findOne({ razorpayPaymentId: paymentId });
                 if (!existingPayment) {
-                    // Log payment record automatically
                     await db_1.Payments.create({
                         razorpayPaymentId: paymentId,
                         razorpayOrderId: orderId,
@@ -1637,7 +1660,47 @@ router.post('/payments/webhook', async (req, res) => {
                         status: 'success',
                         createdAt: new Date().toISOString()
                     });
-                    console.log(`[Razorpay Webhook] Successfully logged orphaned payment ${paymentId} to DB`);
+                    console.log(`[Razorpay Webhook] Successfully logged payment ${paymentId} to Payments DB`);
+                }
+                // 2. Find and update User & Team DB records to ensure user data is never missing/unpaid
+                let targetUser = null;
+                if (notes.userId) {
+                    targetUser = await db_1.Users.findOne({ id: notes.userId });
+                }
+                if (!targetUser && (email || notes.userEmail)) {
+                    const userEmailToFind = (email || notes.userEmail).toLowerCase().trim();
+                    targetUser = await db_1.Users.findOne(u => u.email.toLowerCase().trim() === userEmailToFind);
+                }
+                if (targetUser) {
+                    // Update User Payment Status
+                    await db_1.Users.updateOne(targetUser.id, {
+                        paymentStatus: 'paid',
+                        paymentId: paymentId,
+                        amountPaid: (targetUser.amountPaid || 0) > 0 ? targetUser.amountPaid : amount
+                    });
+                    console.log(`[Razorpay Webhook] Updated User '${targetUser.name}' (${targetUser.id}) to paymentStatus: paid`);
+                    // Update Team Payment Status if user belongs to a team
+                    const teamIdToUpdate = targetUser.teamId || notes.teamId;
+                    if (teamIdToUpdate) {
+                        const team = await db_1.Teams.findOne({ id: teamIdToUpdate });
+                        if (team) {
+                            await db_1.Teams.updateOne(team.id, { paymentStatus: 'paid' });
+                            // Mark all team members as paid
+                            const teamMembers = await db_1.Users.find(u => u.teamId === team.id);
+                            for (const member of teamMembers) {
+                                if (member.paymentStatus !== 'paid') {
+                                    await db_1.Users.updateOne(member.id, {
+                                        paymentStatus: 'paid',
+                                        paymentId: paymentId
+                                    });
+                                }
+                            }
+                            console.log(`[Razorpay Webhook] Updated Team '${team.name}' (${team.id}) and its members to paymentStatus: paid`);
+                        }
+                    }
+                }
+                else {
+                    console.warn(`[Razorpay Webhook Warning] Payment captured but no matching user found for email '${email}' or userId '${notes.userId}'`);
                 }
             }
         }
@@ -1672,6 +1735,9 @@ router.get('/teams/validate-unique', async (req, res) => {
 });
 // Register Team Flow (creates team + leader + members in pending state)
 router.post('/teams/register-team-flow', async (req, res) => {
+    if (isRegistrationClosed()) {
+        return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+    }
     const { teamName, teamCode, leader, members, teamStatus, availableSlots } = req.body;
     if (!teamName || !teamCode || !leader || !members || !Array.isArray(members)) {
         return res.status(400).json({ message: 'Missing team name, team code, leader, or members details.' });
@@ -2423,79 +2489,95 @@ router.get('/teams/my-team', exports.authenticateToken, async (req, res) => {
     });
 });
 // --- ADMIN ENDPOINTS (ADMIN ROLE ONLY) ---
-// 1. Get Live Admin stats
-router.get('/admin/stats', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
-    const allUsers = await db_1.Users.find();
-    const allTeams = await db_1.Teams.find();
-    const allPayments = await db_1.Payments.find();
-    const allVisitors = await db_1.VisitorLogs.find();
-    const totalRegistrations = allUsers.filter(u => u.role !== 'admin').length;
-    const paidParticipants = allUsers.filter(u => u.paymentStatus === 'paid' && u.role !== 'admin').length;
-    const pendingPayments = allUsers.filter(u => u.paymentStatus === 'pending' && u.role !== 'admin').length;
-    const submittedPayments = allUsers.filter(u => u.paymentStatus === 'submitted' && u.role !== 'admin').length;
-    const rejectedPayments = allUsers.filter(u => u.paymentStatus === 'rejected' && u.role !== 'admin').length;
-    const totalTeams = allTeams.length;
-    const checkedInCount = allUsers.filter(u => u.checkedIn && u.role !== 'admin').length;
-    // Calculate unique visitors & pageviews
-    const uniqueVisitorsCount = allVisitors.length;
-    const totalPageViews = allVisitors.reduce((sum, v) => sum + (v.visitCount || 1), 0);
-    const recentVisitorLogs = [...allVisitors]
-        .sort((a, b) => new Date(b.lastVisitedAt || 0).getTime() - new Date(a.lastVisitedAt || 0).getTime())
-        .slice(0, 50);
-    // Calculate total revenue
-    const totalRevenue = allPayments
-        .filter(p => p.status === 'success')
-        .reduce((sum, p) => sum + p.amount, 0);
-    // College count (non-admin paid participants with normalization)
-    const collegeCounts = {};
-    allUsers
-        .filter(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn))
-        .forEach(u => {
-        if (u.college) {
-            const canonical = normalizeCollegeName(u.college);
-            collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+// 1. Get Live Admin stats (alias /admin/overview avoids ad-blocker filters on '/stats')
+router.get(['/admin/stats', '/admin/overview'], exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    try {
+        const allUsers = (await db_1.Users.find()) || [];
+        const allTeams = (await db_1.Teams.find()) || [];
+        const allPayments = (await db_1.Payments.find()) || [];
+        const allVisitors = (await db_1.VisitorLogs.find()) || [];
+        const totalRegistrations = allUsers.filter(u => u && u.role !== 'admin').length;
+        const paidParticipants = allUsers.filter(u => u && u.paymentStatus === 'paid' && u.role !== 'admin').length;
+        const pendingPayments = allUsers.filter(u => u && u.paymentStatus === 'pending' && u.role !== 'admin').length;
+        const submittedPayments = allUsers.filter(u => u && u.paymentStatus === 'submitted' && u.role !== 'admin').length;
+        const rejectedPayments = allUsers.filter(u => u && u.paymentStatus === 'rejected' && u.role !== 'admin').length;
+        const totalTeams = allTeams.length;
+        const checkedInCount = allUsers.filter(u => u && u.checkedIn && u.role !== 'admin').length;
+        // Calculate unique visitors & pageviews
+        const uniqueVisitorsCount = allVisitors.length;
+        const totalPageViews = allVisitors.reduce((sum, v) => sum + (v?.visitCount || 1), 0);
+        const recentVisitorLogs = [...allVisitors]
+            .sort((a, b) => new Date(b?.lastVisitedAt || 0).getTime() - new Date(a?.lastVisitedAt || 0).getTime())
+            .slice(0, 50);
+        // Calculate total revenue
+        const totalRevenue = allPayments
+            .filter(p => p && p.status === 'success')
+            .reduce((sum, p) => sum + (p?.amount || 0), 0);
+        // College count (non-admin paid participants with normalization)
+        const collegeCounts = {};
+        allUsers
+            .filter(u => u && u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn))
+            .forEach(u => {
+            if (u && u.college) {
+                const canonical = normalizeCollegeName(u.college);
+                if (canonical) {
+                    collegeCounts[canonical] = (collegeCounts[canonical] || 0) + 1;
+                }
+            }
+        });
+        const collegesParticipating = Object.keys(collegeCounts).length;
+        // Daily registration chart data (Group by date over last 7 days + registration dates)
+        const registrationsByDate = {};
+        // Pre-fill past 7 days with 0 count
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            const dateKey = d.toISOString().split('T')[0];
+            registrationsByDate[dateKey] = 0;
         }
-    });
-    const collegesParticipating = Object.keys(collegeCounts).length;
-    // Daily registration chart data (Group by date over last 7 days + registration dates)
-    const registrationsByDate = {};
-    // Pre-fill past 7 days with 0 count
-    for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setDate(d.getDate() - i);
-        const dateKey = d.toISOString().split('T')[0];
-        registrationsByDate[dateKey] = 0;
+        allUsers.forEach(u => {
+            if (!u || u.role === 'admin')
+                return;
+            if (u.paymentStatus !== 'paid' && !u.checkedIn)
+                return;
+            let dateStr = 'Unknown';
+            if (u.createdAt) {
+                if (typeof u.createdAt === 'string') {
+                    dateStr = u.createdAt.split('T')[0];
+                }
+                else if (u.createdAt instanceof Date) {
+                    dateStr = u.createdAt.toISOString().split('T')[0];
+                }
+            }
+            if (dateStr !== 'Unknown') {
+                registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
+            }
+        });
+        const liveRegistrationsGraph = Object.keys(registrationsByDate).map(date => ({
+            date,
+            count: registrationsByDate[date]
+        })).sort((a, b) => a.date.localeCompare(b.date));
+        return res.json({
+            totalRegistrations,
+            paidParticipants,
+            pendingPayments,
+            submittedPayments,
+            rejectedPayments,
+            totalTeams,
+            totalRevenue,
+            checkedInCount,
+            collegesParticipating,
+            collegeDistribution: collegeCounts,
+            liveRegistrationsGraph,
+            uniqueVisitorsCount,
+            totalPageViews,
+            visitorLogs: recentVisitorLogs
+        });
     }
-    allUsers.forEach(u => {
-        if (u.role === 'admin')
-            return;
-        if (u.paymentStatus !== 'paid' && !u.checkedIn)
-            return;
-        const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
-        if (dateStr !== 'Unknown') {
-            registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
-        }
-    });
-    const liveRegistrationsGraph = Object.keys(registrationsByDate).map(date => ({
-        date,
-        count: registrationsByDate[date]
-    })).sort((a, b) => a.date.localeCompare(b.date));
-    return res.json({
-        totalRegistrations,
-        paidParticipants,
-        pendingPayments,
-        submittedPayments,
-        rejectedPayments,
-        totalTeams,
-        totalRevenue,
-        checkedInCount,
-        collegesParticipating,
-        collegeDistribution: collegeCounts,
-        liveRegistrationsGraph,
-        uniqueVisitorsCount,
-        totalPageViews,
-        visitorLogs: recentVisitorLogs
-    });
+    catch (err) {
+        console.error('[Admin Stats Error]:', err);
+        return res.status(500).json({ message: err?.message || 'Internal server error while compiling stats.' });
+    }
 });
 // Track Unique Visit by IP / User ID
 router.post('/track-visit', async (req, res) => {

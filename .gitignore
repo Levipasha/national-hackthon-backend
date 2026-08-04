@@ -3,3 +3,13 @@ dist/
 .env
 .env.local
 .DS_Store
+
+# One-off maintenance & diagnostic scripts
+src/scripts/
+check_*.js
+create_*.js
+find_*.js
+insert_*.js
+inspect_*.js
+update_*.js
+

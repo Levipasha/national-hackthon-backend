@@ -1,1 +1,30 @@
-[]
+[
+  {
+    "id": "pay_log_2y2yubr",
+    "_id": "6a71fcafcbb11ef32381b69f",
+    "razorpayPaymentId": "T2608031856303818661489",
+    "razorpayOrderId": "order_phonepe_manual",
+    "userId": "u_l1t50b3",
+    "userName": "Abdul Rahaman Shuraim",
+    "userEmail": "shuraim.ai.tech@gmail.com",
+    "amount": 1995,
+    "utr": "988888814627",
+    "status": "success",
+    "createdAt": "2026-08-03T18:56:00.000Z",
+    "__v": 0
+  },
+  {
+    "id": "pay_log_spaccqe",
+    "_id": "6a72008180b219af0b183720",
+    "razorpayPaymentId": "pay_upi_8977220846",
+    "razorpayOrderId": "order_upi_manual",
+    "userId": "u_tklko7m",
+    "userName": "Harsha Vardhan N",
+    "userEmail": "nimmaharshavardhann@gmail.com",
+    "amount": 1197,
+    "upiHandle": "8977220846@slc",
+    "status": "success",
+    "createdAt": "2026-08-04T13:20:11.000Z",
+    "__v": 0
+  }
+]
