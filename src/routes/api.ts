@@ -515,6 +515,17 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
     return res.status(500).json({ message: 'Failed to retrieve user.' });
   }
 
+  // Restrict non-leader team members from logging in if payment is pending
+  if (user.teamId && user.paymentStatus !== 'paid' && user.role !== 'team-leader' && user.teamRole !== 'leader') {
+    const team = await Teams.findOne({ id: user.teamId });
+    const leader = team ? await Users.findOne({ id: team.leaderId }) : null;
+    const leaderName = leader ? leader.name : 'your team leader';
+    return res.status(403).json({
+      paymentPending: true,
+      message: `Your team registration payment is pending. Please ask ${leaderName} (${leader ? leader.email : ''}) to log in and complete the team payment first.`
+    });
+  }
+
   const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
   return res.json({ token, user });
 });
@@ -598,6 +609,17 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
       });
     }
 
+    // Restrict non-leader team members from logging in if payment is pending
+    if (user.teamId && user.paymentStatus !== 'paid' && user.role !== 'team-leader' && user.teamRole !== 'leader') {
+      const team = await Teams.findOne({ id: user.teamId });
+      const leader = team ? await Users.findOne({ id: team.leaderId }) : null;
+      const leaderName = leader ? leader.name : 'your team leader';
+      return res.status(403).json({
+        paymentPending: true,
+        message: `Your team registration payment is pending. Please ask ${leaderName} (${leader ? leader.email : ''}) to log in and complete the team payment first.`
+      });
+    }
+
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ token, user });
 
@@ -620,6 +642,17 @@ router.post('/auth/bypass-login', async (req: Request, res: Response) => {
 
     if (!user) {
       return res.status(404).json({ message: 'User not found in database.' });
+    }
+
+    // Restrict non-leader team members from logging in if payment is pending
+    if (user.teamId && user.paymentStatus !== 'paid' && user.role !== 'team-leader' && user.teamRole !== 'leader') {
+      const team = await Teams.findOne({ id: user.teamId });
+      const leader = team ? await Users.findOne({ id: team.leaderId }) : null;
+      const leaderName = leader ? leader.name : 'your team leader';
+      return res.status(403).json({
+        paymentPending: true,
+        message: `Your team registration payment is pending. Please ask ${leaderName} (${leader ? leader.email : ''}) to log in and complete the team payment first.`
+      });
     }
 
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -930,7 +963,7 @@ router.get('/public/participants', async (req: Request, res: Response) => {
     // Include paid users AND pending users who are already in a team (added by leader)
     const allUsers = await Users.find(u =>
       u.role !== 'admin' &&
-      (u.paymentStatus === 'paid' || !!u.teamId)
+      (u.paymentStatus === 'paid' || (u.paymentStatus as any) === 'submitted')
     );
     const allTeams = await Teams.find();
 
