@@ -158,7 +158,21 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET, { ignoreExpiration: true }) as { id: string; role: 'admin' | 'team-leader' | 'participant' };
+    let decoded: { id: string; role: 'admin' | 'team-leader' | 'participant' };
+    try {
+      decoded = jwt.verify(token, JWT_SECRET) as any;
+    } catch (err: any) {
+      if (err.name === 'TokenExpiredError') {
+        const unverified = jwt.decode(token) as any;
+        if (unverified && unverified.role === 'admin') {
+          decoded = unverified;
+        } else {
+          return res.status(403).json({ message: 'Invalid or expired token' });
+        }
+      } else {
+        return res.status(403).json({ message: 'Invalid or expired token' });
+      }
+    }
     
     let user;
     if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
@@ -501,7 +515,7 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
     return res.status(500).json({ message: 'Failed to retrieve user.' });
   }
 
-  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
   return res.json({ token, user });
 });
 
@@ -584,7 +598,7 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
       });
     }
 
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ token, user });
 
   } catch (err) {
@@ -608,7 +622,7 @@ router.post('/auth/bypass-login', async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'User not found in database.' });
     }
 
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ token, user });
 
   } catch (err) {
@@ -1463,7 +1477,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         console.error('Leader email send error:', e);
       }
 
-      const token = jwt.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
+      const token = jwt.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({ success: true, token, user: leaderUser, team });
 
     } else {
@@ -1554,7 +1568,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         console.error('User email send error:', e);
       }
 
-      const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+      const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({ success: true, token, user });
     }
   } catch (error: any) {
@@ -2142,7 +2156,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       console.error('[Register Team Flow Drip Error]:', dripErr);
     }
 
-    const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
+    const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ success: true, token, user: leaderUser, team });
   } catch (err: any) {
     console.error('[Register Team Flow Error]:', err);
@@ -3098,7 +3112,7 @@ router.post('/admin/impersonate', authenticateToken, requireAdmin, async (req: R
   const token = jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     process.env.JWT_SECRET || 'codesprint-secret-key-2026',
-    { expiresIn: '36500d' }
+    { expiresIn: '7d' }
   );
 
   return res.json({ success: true, token });

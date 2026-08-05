@@ -128,7 +128,24 @@ const authenticateToken = async (req, res, next) => {
         return res.status(401).json({ message: 'Authorization token required' });
     }
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET, { ignoreExpiration: true });
+        let decoded;
+        try {
+            decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        }
+        catch (err) {
+            if (err.name === 'TokenExpiredError') {
+                const unverified = jsonwebtoken_1.default.decode(token);
+                if (unverified && unverified.role === 'admin') {
+                    decoded = unverified;
+                }
+                else {
+                    return res.status(403).json({ message: 'Invalid or expired token' });
+                }
+            }
+            else {
+                return res.status(403).json({ message: 'Invalid or expired token' });
+            }
+        }
         let user;
         if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
             // Covers legacy 'admin-local' and new Google-auth admin ids like 'admin-vamshi'
@@ -440,7 +457,7 @@ router.post('/auth/otp-verify', async (req, res) => {
     if (!user) {
         return res.status(500).json({ message: 'Failed to retrieve user.' });
     }
-    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({ token, user });
 });
 // 2.5. Admin Login (Password-only for local running)
@@ -506,7 +523,7 @@ router.post('/auth/google-login', async (req, res) => {
                 message: 'Account not found. Please register first to participate in CodeSprint-2026.',
             });
         }
-        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
         return res.json({ token, user });
     }
     catch (err) {
@@ -526,7 +543,7 @@ router.post('/auth/bypass-login', async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'User not found in database.' });
         }
-        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
         return res.json({ token, user });
     }
     catch (err) {
@@ -1277,7 +1294,7 @@ router.post('/payments/verify-and-register', async (req, res) => {
             catch (e) {
                 console.error('Leader email send error:', e);
             }
-            const token = jsonwebtoken_1.default.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
+            const token = jsonwebtoken_1.default.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
             return res.json({ success: true, token, user: leaderUser, team });
         }
         else {
@@ -1362,7 +1379,7 @@ router.post('/payments/verify-and-register', async (req, res) => {
             catch (e) {
                 console.error('User email send error:', e);
             }
-            const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
+            const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
             return res.json({ success: true, token, user });
         }
     }
@@ -1909,7 +1926,7 @@ router.post('/teams/register-team-flow', async (req, res) => {
         catch (dripErr) {
             console.error('[Register Team Flow Drip Error]:', dripErr);
         }
-        const token = jsonwebtoken_1.default.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
+        const token = jsonwebtoken_1.default.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
         return res.json({ success: true, token, user: leaderUser, team });
     }
     catch (err) {
@@ -2755,7 +2772,7 @@ router.post('/admin/impersonate', exports.authenticateToken, exports.requireAdmi
     if (!user)
         return res.status(404).json({ message: 'User not found' });
     // Generate JWT token for this user
-    const token = jsonwebtoken_1.default.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'codesprint-secret-key-2026', { expiresIn: '36500d' });
+    const token = jsonwebtoken_1.default.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'codesprint-secret-key-2026', { expiresIn: '7d' });
     return res.json({ success: true, token });
 });
 // ─── Admin: Approve / Reject submitted payment (UTR or manual) ───────────────
