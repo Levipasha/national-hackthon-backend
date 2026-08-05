@@ -128,7 +128,7 @@ const authenticateToken = async (req, res, next) => {
         return res.status(401).json({ message: 'Authorization token required' });
     }
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET, { ignoreExpiration: true });
         let user;
         if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
             // Covers legacy 'admin-local' and new Google-auth admin ids like 'admin-vamshi'
@@ -440,7 +440,7 @@ router.post('/auth/otp-verify', async (req, res) => {
     if (!user) {
         return res.status(500).json({ message: 'Failed to retrieve user.' });
     }
-    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
     return res.json({ token, user });
 });
 // 2.5. Admin Login (Password-only for local running)
@@ -462,7 +462,7 @@ router.post('/auth/admin-login', async (req, res) => {
         paymentStatus: 'paid',
         checkedIn: true
     };
-    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
     return res.json({ token, user });
 });
 // 3. Google Login — verify Firebase ID token
@@ -506,7 +506,7 @@ router.post('/auth/google-login', async (req, res) => {
                 message: 'Account not found. Please register first to participate in CodeSprint-2026.',
             });
         }
-        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
         return res.json({ token, user });
     }
     catch (err) {
@@ -526,7 +526,7 @@ router.post('/auth/bypass-login', async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'User not found in database.' });
         }
-        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
         return res.json({ token, user });
     }
     catch (err) {
@@ -645,7 +645,7 @@ router.post('/admin/verify-otp', async (req, res) => {
             email: normalEmail,
             role: 'admin',
         };
-        const token = jsonwebtoken_1.default.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+        const token = jsonwebtoken_1.default.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '36500d' });
         return res.json({ token, user: adminUser });
     }
     catch (err) {
@@ -1277,7 +1277,7 @@ router.post('/payments/verify-and-register', async (req, res) => {
             catch (e) {
                 console.error('Leader email send error:', e);
             }
-            const token = jsonwebtoken_1.default.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+            const token = jsonwebtoken_1.default.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
             return res.json({ success: true, token, user: leaderUser, team });
         }
         else {
@@ -1362,7 +1362,7 @@ router.post('/payments/verify-and-register', async (req, res) => {
             catch (e) {
                 console.error('User email send error:', e);
             }
-            const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+            const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
             return res.json({ success: true, token, user });
         }
     }
@@ -1909,7 +1909,7 @@ router.post('/teams/register-team-flow', async (req, res) => {
         catch (dripErr) {
             console.error('[Register Team Flow Drip Error]:', dripErr);
         }
-        const token = jsonwebtoken_1.default.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jsonwebtoken_1.default.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
         return res.json({ success: true, token, user: leaderUser, team });
     }
     catch (err) {
@@ -2755,7 +2755,7 @@ router.post('/admin/impersonate', exports.authenticateToken, exports.requireAdmi
     if (!user)
         return res.status(404).json({ message: 'User not found' });
     // Generate JWT token for this user
-    const token = jsonwebtoken_1.default.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'codesprint-secret-key-2026', { expiresIn: '7d' });
+    const token = jsonwebtoken_1.default.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || 'codesprint-secret-key-2026', { expiresIn: '36500d' });
     return res.json({ success: true, token });
 });
 // ─── Admin: Approve / Reject submitted payment (UTR or manual) ───────────────
@@ -3069,23 +3069,48 @@ router.post('/admin/notifications/send', exports.authenticateToken, exports.requ
     console.log(`[BROADCAST] Target: ${recipientType} (${recipientTarget || 'ALL'}). Message: ${message}`);
     return res.json({ success: true, message: `Notification Banner successfully dispatched!`, notification });
 });
-// 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Participant Ledger)
+// Helper for safe date parsing and formatting YYYY-MM-DD
+function safeFormatDateKey(val) {
+    if (!val)
+        return 'Unknown';
+    if (typeof val === 'string')
+        return val.split('T')[0] || val;
+    if (val instanceof Date)
+        return val.toISOString().split('T')[0];
+    if (typeof val?.toISOString === 'function')
+        return val.toISOString().split('T')[0];
+    try {
+        const d = new Date(val);
+        if (!isNaN(d.getTime()))
+            return d.toISOString().split('T')[0];
+    }
+    catch (e) { }
+    return 'Unknown';
+}
+// Helper for CSV value escaping
+function escapeCsvVal(val) {
+    if (val === null || val === undefined)
+        return '""';
+    const str = String(val).replace(/"/g, '""');
+    return `"${str}"`;
+}
+// 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Gender + Participant Ledger)
 router.get('/admin/export-csv', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
-    const users = await db_1.Users.find(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn));
+    const users = await db_1.Users.find(u => u.role !== 'admin');
     const allTeams = await db_1.Teams.find();
     const teamMap = {};
     allTeams.forEach(t => { teamMap[t.id] = t.name; });
     // 1. Day-by-day registrations breakdown
     const registrationsByDate = {};
     users.forEach(u => {
-        const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
+        const dateStr = safeFormatDateKey(u.createdAt);
         if (dateStr !== 'Unknown') {
             registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
         }
     });
     const dateRows = Object.keys(registrationsByDate)
         .sort((a, b) => a.localeCompare(b))
-        .map(date => `"${date}",${registrationsByDate[date]}`)
+        .map(date => `${escapeCsvVal(date)},${registrationsByDate[date]}`)
         .join('\n');
     // 2. College-wise distribution breakdown (with normalization)
     const collegeCounts = {};
@@ -3097,18 +3122,53 @@ router.get('/admin/export-csv', exports.authenticateToken, exports.requireAdmin,
     });
     const collegeRows = Object.keys(collegeCounts)
         .sort((a, b) => collegeCounts[b] - collegeCounts[a])
-        .map(clg => `"${clg}",${collegeCounts[clg]}`)
+        .map(clg => `${escapeCsvVal(clg)},${collegeCounts[clg]}`)
         .join('\n');
-    // 3. Participant Registration records
+    // 3. Gender demographics breakdown
+    let maleCount = 0;
+    let femaleCount = 0;
+    let otherGenderCount = 0;
+    users.forEach(u => {
+        const g = (u.gender || '').toLowerCase().trim();
+        if (g === 'male' || g === 'm')
+            maleCount++;
+        else if (g === 'female' || g === 'f')
+            femaleCount++;
+        else
+            otherGenderCount++;
+    });
+    const totalUsers = users.length;
+    const malePct = totalUsers ? ((maleCount / totalUsers) * 100).toFixed(1) : '0';
+    const femalePct = totalUsers ? ((femaleCount / totalUsers) * 100).toFixed(1) : '0';
+    const otherPct = totalUsers ? ((otherGenderCount / totalUsers) * 100).toFixed(1) : '0';
+    // 4. Participant Registration records (13 columns)
     const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,RegistrationDate\n';
     const participantRows = users.map(u => {
         const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-        return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${FRONTEND_BASE_URL}","${u.createdAt}"`;
+        const dateFormatted = u.createdAt ? (typeof u.createdAt === 'string' ? u.createdAt : (typeof u.createdAt.toISOString === 'function' ? u.createdAt.toISOString() : String(u.createdAt))) : '';
+        return [
+            escapeCsvVal(u.id),
+            escapeCsvVal(u.name),
+            escapeCsvVal(u.email),
+            escapeCsvVal(u.phone),
+            escapeCsvVal(u.college),
+            escapeCsvVal(u.branch),
+            escapeCsvVal(u.year),
+            escapeCsvVal(u.gender),
+            escapeCsvVal(u.tshirtSize),
+            escapeCsvVal(teamName),
+            escapeCsvVal(u.paymentStatus),
+            escapeCsvVal(u.amountPaid ?? 0),
+            escapeCsvVal(dateFormatted)
+        ].join(',');
     }).join('\n');
     const csvContent = `================================================================================
 CODESPRINT 2026 — COMPREHENSIVE REGISTRATION & ANALYTICS REPORT
 Generated On: ${new Date().toISOString()}
-Total Registrations: ${users.length}
+Total Registrations: ${totalUsers}
+Male Participants: ${maleCount} (${malePct}%)
+Female Participants: ${femaleCount} (${femalePct}%)
+Other / Unspecified: ${otherGenderCount} (${otherPct}%)
 ================================================================================
 
 === SECTION 1: DAY-BY-DAY REGISTRATIONS BREAKDOWN ===
@@ -3119,10 +3179,16 @@ ${dateRows || 'No records'}
 College Name,Student Count
 ${collegeRows || 'No records'}
 
-=== SECTION 3: ALL PARTICIPANT REGISTRATION RECORDS ===
+=== SECTION 3: GENDER DEMOGRAPHICS BREAKDOWN ===
+Gender,Student Count,Percentage
+Male,${maleCount},${malePct}%
+Female,${femaleCount},${femalePct}%
+Other / Unspecified,${otherGenderCount},${otherPct}%
+
+=== SECTION 4: ALL PARTICIPANT REGISTRATION RECORDS ===
 ${headers}${participantRows}
 `;
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename=codesprint_registrations_analytics_report.csv');
     return res.send(csvContent);
 });

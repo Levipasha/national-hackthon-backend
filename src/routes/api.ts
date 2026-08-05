@@ -158,7 +158,7 @@ export const authenticateToken = async (req: AuthRequest, res: Response, next: N
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; role: 'admin' | 'team-leader' | 'participant' };
+    const decoded = jwt.verify(token, JWT_SECRET, { ignoreExpiration: true }) as { id: string; role: 'admin' | 'team-leader' | 'participant' };
     
     let user;
     if (decoded.id === 'admin-local' || (decoded.id && decoded.id.startsWith('admin-') && decoded.role === 'admin')) {
@@ -501,7 +501,7 @@ router.post('/auth/otp-verify', async (req: Request, res: Response) => {
     return res.status(500).json({ message: 'Failed to retrieve user.' });
   }
 
-  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
   return res.json({ token, user });
 });
 
@@ -527,7 +527,7 @@ router.post('/auth/admin-login', async (req: Request, res: Response) => {
     checkedIn: true
   };
 
-  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
   return res.json({ token, user });
 });
 
@@ -584,7 +584,7 @@ router.post('/auth/google-login', async (req: Request, res: Response) => {
       });
     }
 
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
     return res.json({ token, user });
 
   } catch (err) {
@@ -608,7 +608,7 @@ router.post('/auth/bypass-login', async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'User not found in database.' });
     }
 
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
     return res.json({ token, user });
 
   } catch (err) {
@@ -747,7 +747,7 @@ router.post('/admin/verify-otp', async (req: Request, res: Response) => {
       email: normalEmail,
       role: 'admin' as const,
     };
-    const token = jwt.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '12h' });
+    const token = jwt.sign({ id: adminUser.id, role: 'admin' }, JWT_SECRET, { expiresIn: '36500d' });
 
     return res.json({ token, user: adminUser });
 
@@ -1463,7 +1463,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         console.error('Leader email send error:', e);
       }
 
-      const token = jwt.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+      const token = jwt.sign({ id: leaderUser.id, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
       return res.json({ success: true, token, user: leaderUser, team });
 
     } else {
@@ -1554,7 +1554,7 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
         console.error('User email send error:', e);
       }
 
-      const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+      const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '36500d' });
       return res.json({ success: true, token, user });
     }
   } catch (error: any) {
@@ -2142,7 +2142,7 @@ router.post('/teams/register-team-flow', async (req: Request, res: Response) => 
       console.error('[Register Team Flow Drip Error]:', dripErr);
     }
 
-    const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: leaderId, role: 'team-leader' }, JWT_SECRET, { expiresIn: '36500d' });
     return res.json({ success: true, token, user: leaderUser, team });
   } catch (err: any) {
     console.error('[Register Team Flow Error]:', err);
@@ -3098,7 +3098,7 @@ router.post('/admin/impersonate', authenticateToken, requireAdmin, async (req: R
   const token = jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     process.env.JWT_SECRET || 'codesprint-secret-key-2026',
-    { expiresIn: '7d' }
+    { expiresIn: '36500d' }
   );
 
   return res.json({ success: true, token });
@@ -3463,9 +3463,29 @@ router.post('/admin/notifications/send', authenticateToken, requireAdmin, async 
   return res.json({ success: true, message: `Notification Banner successfully dispatched!`, notification });
 });
 
-// 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Participant Ledger)
+// Helper for safe date parsing and formatting YYYY-MM-DD
+function safeFormatDateKey(val: any): string {
+  if (!val) return 'Unknown';
+  if (typeof val === 'string') return val.split('T')[0] || val;
+  if (val instanceof Date) return val.toISOString().split('T')[0];
+  if (typeof val?.toISOString === 'function') return val.toISOString().split('T')[0];
+  try {
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) return d.toISOString().split('T')[0];
+  } catch (e) {}
+  return 'Unknown';
+}
+
+// Helper for CSV value escaping
+function escapeCsvVal(val: any): string {
+  if (val === null || val === undefined) return '""';
+  const str = String(val).replace(/"/g, '""');
+  return `"${str}"`;
+}
+
+// 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Gender + Participant Ledger)
 router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Request, res: Response) => {
-  const users = await Users.find(u => u.role !== 'admin' && (u.paymentStatus === 'paid' || u.checkedIn));
+  const users = await Users.find(u => u.role !== 'admin');
   const allTeams = await Teams.find();
   const teamMap: Record<string, string> = {};
   allTeams.forEach(t => { teamMap[t.id] = t.name; });
@@ -3473,14 +3493,14 @@ router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Req
   // 1. Day-by-day registrations breakdown
   const registrationsByDate: Record<string, number> = {};
   users.forEach(u => {
-    const dateStr = u.createdAt ? u.createdAt.split('T')[0] : 'Unknown';
+    const dateStr = safeFormatDateKey(u.createdAt);
     if (dateStr !== 'Unknown') {
       registrationsByDate[dateStr] = (registrationsByDate[dateStr] || 0) + 1;
     }
   });
   const dateRows = Object.keys(registrationsByDate)
     .sort((a, b) => a.localeCompare(b))
-    .map(date => `"${date}",${registrationsByDate[date]}`)
+    .map(date => `${escapeCsvVal(date)},${registrationsByDate[date]}`)
     .join('\n');
 
   // 2. College-wise distribution breakdown (with normalization)
@@ -3493,21 +3513,55 @@ router.get('/admin/export-csv', authenticateToken, requireAdmin, async (req: Req
   });
   const collegeRows = Object.keys(collegeCounts)
     .sort((a, b) => collegeCounts[b] - collegeCounts[a])
-    .map(clg => `"${clg}",${collegeCounts[clg]}`)
+    .map(clg => `${escapeCsvVal(clg)},${collegeCounts[clg]}`)
     .join('\n');
 
-  // 3. Participant Registration records
+  // 3. Gender demographics breakdown
+  let maleCount = 0;
+  let femaleCount = 0;
+  let otherGenderCount = 0;
+  users.forEach(u => {
+    const g = (u.gender || '').toLowerCase().trim();
+    if (g === 'male' || g === 'm') maleCount++;
+    else if (g === 'female' || g === 'f') femaleCount++;
+    else otherGenderCount++;
+  });
+
+  const totalUsers = users.length;
+  const malePct = totalUsers ? ((maleCount / totalUsers) * 100).toFixed(1) : '0';
+  const femalePct = totalUsers ? ((femaleCount / totalUsers) * 100).toFixed(1) : '0';
+  const otherPct = totalUsers ? ((otherGenderCount / totalUsers) * 100).toFixed(1) : '0';
+
+  // 4. Participant Registration records (13 columns)
   const headers = 'ID,Name,Email,Phone,College,Branch,Year,Gender,TshirtSize,TeamName,PaymentStatus,AmountPaid,RegistrationDate\n';
   const participantRows = users.map(u => {
     const teamName = u.teamId ? (teamMap[u.teamId] || u.teamId) : '';
-    return `"${u.id}","${u.name}","${u.email}","${u.phone}","${u.college}","${u.branch}","${u.year}","${u.gender || ''}","${u.tshirtSize || ''}","${teamName}","${u.paymentStatus}",${u.amountPaid || 0},"${FRONTEND_BASE_URL}","${u.createdAt}"`;
+    const dateFormatted = u.createdAt ? (typeof u.createdAt === 'string' ? u.createdAt : (typeof (u.createdAt as any).toISOString === 'function' ? (u.createdAt as any).toISOString() : String(u.createdAt))) : '';
+    return [
+      escapeCsvVal(u.id),
+      escapeCsvVal(u.name),
+      escapeCsvVal(u.email),
+      escapeCsvVal(u.phone),
+      escapeCsvVal(u.college),
+      escapeCsvVal(u.branch),
+      escapeCsvVal(u.year),
+      escapeCsvVal(u.gender),
+      escapeCsvVal(u.tshirtSize),
+      escapeCsvVal(teamName),
+      escapeCsvVal(u.paymentStatus),
+      escapeCsvVal(u.amountPaid ?? 0),
+      escapeCsvVal(dateFormatted)
+    ].join(',');
   }).join('\n');
 
   const csvContent = 
 `================================================================================
 CODESPRINT 2026 — COMPREHENSIVE REGISTRATION & ANALYTICS REPORT
 Generated On: ${new Date().toISOString()}
-Total Registrations: ${users.length}
+Total Registrations: ${totalUsers}
+Male Participants: ${maleCount} (${malePct}%)
+Female Participants: ${femaleCount} (${femalePct}%)
+Other / Unspecified: ${otherGenderCount} (${otherPct}%)
 ================================================================================
 
 === SECTION 1: DAY-BY-DAY REGISTRATIONS BREAKDOWN ===
@@ -3518,11 +3572,17 @@ ${dateRows || 'No records'}
 College Name,Student Count
 ${collegeRows || 'No records'}
 
-=== SECTION 3: ALL PARTICIPANT REGISTRATION RECORDS ===
+=== SECTION 3: GENDER DEMOGRAPHICS BREAKDOWN ===
+Gender,Student Count,Percentage
+Male,${maleCount},${malePct}%
+Female,${femaleCount},${femalePct}%
+Other / Unspecified,${otherGenderCount},${otherPct}%
+
+=== SECTION 4: ALL PARTICIPANT REGISTRATION RECORDS ===
 ${headers}${participantRows}
 `;
 
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename=codesprint_registrations_analytics_report.csv');
   return res.send(csvContent);
 });
