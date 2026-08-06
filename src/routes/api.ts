@@ -1612,13 +1612,17 @@ router.post('/payments/verify-and-register', async (req: Request, res: Response)
 
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', authenticateToken, async (req: AuthRequest, res: Response) => {
-  if (isRegistrationClosed()) {
-    return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
-  }
-
   let expectedAmount = 399;
   try {
     const user = await Users.findOne({ id: req.user!.id });
+
+    if (isRegistrationClosed()) {
+      const isExistingUnpaid = user && (user.teamId || user.paymentStatus === 'pending' || user.paymentStatus === 'submitted');
+      if (!isExistingUnpaid) {
+        return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+      }
+    }
+
     if (user) {
       if (user.role === 'team-leader' && user.teamId) {
         const team = await Teams.findOne({ id: user.teamId });

@@ -280,5 +280,41 @@
     "joinRequests": [],
     "paymentStatus": "pending",
     "createdAt": "2026-08-05T19:32:46.429Z"
+  },
+  {
+    "_id": "6a706e2fae02de256c0776ec",
+    "id": "CS2026-177",
+    "name": "Hack Nation",
+    "description": "Created during team registration.",
+    "college": "Mvr College of Engineering & Technology",
+    "leaderId": "u_89ve6ll",
+    "members": [
+      "u_89ve6ll",
+      "u_p0wc190",
+      "u_fbds5ib",
+      "u_ixilnwb",
+      "u_4oht6f9"
+    ],
+    "memberCount": 5,
+    "remainingSlots": 0,
+    "paidSlots": 5,
+    "availableSlots": 0,
+    "teamStatus": "CLOSED",
+    "status": "full",
+    "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-177",
+    "joinRequests": [
+      {
+        "requestId": "c74d1978-c026-4dfa-aa13-3ac8145446b6",
+        "userId": "u_4oht6f9",
+        "name": "K.Dayanand",
+        "email": "kokkiligaddadayanand@gmail.com",
+        "college": "Mvr College of Engineering & Technology",
+        "status": "ACCEPTED",
+        "requestedAt": "2026-08-05T11:00:59.470Z"
+      }
+    ],
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-03T10:32:15.613Z",
+    "__v": 0
   }
 ]
