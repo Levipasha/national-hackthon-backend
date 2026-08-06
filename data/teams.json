@@ -272,14 +272,15 @@
     ],
     "memberCount": 5,
     "remainingSlots": 0,
-    "paidSlots": 0,
+    "paidSlots": 5,
     "availableSlots": 0,
     "teamStatus": "CLOSED",
     "status": "full",
     "inviteLink": "https://national-hackthon-backend.vercel.app/teams/join?teamId=CS2026-1395",
     "joinRequests": [],
-    "paymentStatus": "pending",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "paymentStatus": "paid",
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "utr": "283053851234"
   },
   {
     "_id": "6a706e2fae02de256c0776ec",

@@ -1062,8 +1062,8 @@
     "tshirtSize": "M",
     "linkedin": "",
     "role": "team-leader",
-    "paymentStatus": "pending",
-    "amountPaid": 0,
+    "paymentStatus": "paid",
+    "amountPaid": 1995,
     "checkedIn": false,
     "profileCompleted": true,
     "registrationType": "TEAM",
@@ -1071,7 +1071,9 @@
     "teamRole": "leader",
     "tempTeamName": "code Strom",
     "tempTeamCode": "CS2026-1395",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "paymentId": "pay_TLe2830538512",
+    "utr": "283053851234"
   },
   {
     "id": "u_dgmr7tp",
@@ -1086,7 +1088,7 @@
     "tshirtSize": "S",
     "linkedin": "",
     "role": "participant",
-    "paymentStatus": "pending",
+    "paymentStatus": "paid",
     "amountPaid": 0,
     "checkedIn": false,
     "profileCompleted": true,
@@ -1095,7 +1097,9 @@
     "teamRole": "member",
     "tempTeamName": "code Strom",
     "tempTeamCode": "CS2026-1395",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "paymentId": "pay_TLe2830538512",
+    "utr": "283053851234"
   },
   {
     "id": "u_2ibstmy",
@@ -1110,7 +1114,7 @@
     "tshirtSize": "XXL",
     "linkedin": "",
     "role": "participant",
-    "paymentStatus": "pending",
+    "paymentStatus": "paid",
     "amountPaid": 0,
     "checkedIn": false,
     "profileCompleted": true,
@@ -1119,7 +1123,9 @@
     "teamRole": "member",
     "tempTeamName": "code Strom",
     "tempTeamCode": "CS2026-1395",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "paymentId": "pay_TLe2830538512",
+    "utr": "283053851234"
   },
   {
     "id": "u_35hukh6",
@@ -1134,7 +1140,7 @@
     "tshirtSize": "S",
     "linkedin": "",
     "role": "participant",
-    "paymentStatus": "pending",
+    "paymentStatus": "paid",
     "amountPaid": 0,
     "checkedIn": false,
     "profileCompleted": true,
@@ -1143,7 +1149,9 @@
     "teamRole": "member",
     "tempTeamName": "code Strom",
     "tempTeamCode": "CS2026-1395",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "paymentId": "pay_TLe2830538512",
+    "utr": "283053851234"
   },
   {
     "id": "u_tpf562g",
@@ -1158,7 +1166,7 @@
     "tshirtSize": "S",
     "linkedin": "",
     "role": "participant",
-    "paymentStatus": "pending",
+    "paymentStatus": "paid",
     "amountPaid": 0,
     "checkedIn": false,
     "profileCompleted": true,
@@ -1167,7 +1175,9 @@
     "teamRole": "member",
     "tempTeamName": "code Strom",
     "tempTeamCode": "CS2026-1395",
-    "createdAt": "2026-08-05T19:32:46.429Z"
+    "createdAt": "2026-08-05T19:32:46.429Z",
+    "paymentId": "pay_TLe2830538512",
+    "utr": "283053851234"
   },
   {
     "_id": "6a7317b9497d6502e0875db1",
