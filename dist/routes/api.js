@@ -1420,20 +1420,29 @@ router.post('/payments/verify-and-register', async (req, res) => {
 });
 // 1. Create Order (Real Razorpay integration)
 router.post('/payments/create-order', exports.authenticateToken, async (req, res) => {
-    if (isRegistrationClosed()) {
-        return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
-    }
     let expectedAmount = 399;
     try {
         const user = await db_1.Users.findOne({ id: req.user.id });
+        if (isRegistrationClosed()) {
+            const isExistingUnpaid = user && (user.teamId || user.paymentStatus === 'pending' || user.paymentStatus === 'submitted');
+            if (!isExistingUnpaid) {
+                return res.status(403).json({ message: 'Registrations for CodeSprint 2026 officially closed on Wednesday, August 5, 2026 at 11:59 PM IST.' });
+            }
+        }
         if (user) {
-            if (user.role === 'team-leader' && user.teamId) {
+            if ((user.role === 'team-leader' || user.teamRole === 'leader') && user.teamId) {
                 const team = await db_1.Teams.findOne({ id: user.teamId });
                 if (team) {
-                    // Calculate amount only for members who have NOT paid yet
+                    // Calculate amount for all members who have NOT paid yet
                     const unpaidMembers = await db_1.Users.find(u => u.teamId === team.id && u.paymentStatus !== 'paid');
-                    expectedAmount = unpaidMembers.length * 399;
+                    const countToPay = unpaidMembers.length > 0 ? unpaidMembers.length : 1;
+                    expectedAmount = countToPay * 399;
                 }
+            }
+            else if (user.teamId && user.teamRole === 'member') {
+                return res.status(400).json({
+                    message: 'Team registration payment is managed by your Team Leader. Please ask your Team Leader to log in and complete payment for the team.'
+                });
             }
             else {
                 expectedAmount = 399;
@@ -2045,187 +2054,9 @@ router.post('/teams/set-availability', exports.authenticateToken, async (req, re
         return res.status(500).json({ message: err.message || 'Failed to update team availability.' });
     }
 });
-// 1.5. Add Member directly (Team Leader Only)
+// 1.5. Add Member directly (Team Leader Only) - Disabled
 router.post('/teams/add-member', exports.authenticateToken, async (req, res) => {
-    const userId = req.user?.id;
-    if (!userId)
-        return res.status(401).json({ message: 'Unauthorized' });
-    const leader = await db_1.Users.findOne({ id: userId });
-    if (!leader || leader.teamRole !== 'leader' || !leader.teamId) {
-        return res.status(400).json({ message: 'Only team leaders can add members.' });
-    }
-    const team = await db_1.Teams.findOne({ id: leader.teamId });
-    if (!team)
-        return res.status(404).json({ message: 'Team not found.' });
-    const { members: membersArray } = req.body;
-    // Calculate available prepaid slots
-    const paidMembersCount = (await db_1.Users.find({ teamId: team.id, paymentStatus: 'paid' })).length;
-    let availablePaidSlots = (team.paidSlots || 1) - paidMembersCount;
-    // ── MULTI-MEMBER MODE (array payload from dashboard modal) ──
-    if (Array.isArray(membersArray) && membersArray.length > 0) {
-        // Capacity check
-        if (team.members.length + membersArray.length > 5) {
-            return res.status(400).json({
-                message: `Adding ${membersArray.length} member(s) would exceed the team limit of 5. Your team currently has ${team.members.length} member(s).`
-            });
-        }
-        const addedUsers = [];
-        for (const m of membersArray) {
-            const { name, email, phone, rollNumber, college, branch, year, gender, tshirtSize, foodPreference } = m;
-            if (!name || !email)
-                continue;
-            let targetUser = await db_1.Users.findOne({ email: email.toLowerCase() });
-            if (targetUser && targetUser.teamId)
-                continue; // skip if already in a team
-            // Decide payment status based on prepaid slots
-            const paymentStatus = availablePaidSlots > 0 ? 'paid' : 'pending';
-            if (availablePaidSlots > 0) {
-                availablePaidSlots -= 1;
-            }
-            if (!targetUser) {
-                targetUser = await db_1.Users.create({
-                    id: `u_${Math.random().toString(36).substring(2, 9)}`,
-                    name,
-                    email: email.toLowerCase(),
-                    phone: phone || leader.phone,
-                    college: college || leader.college,
-                    rollNumber: rollNumber || '',
-                    branch: branch || 'Unknown',
-                    year: year || '1st Year',
-                    gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
-                    tshirtSize: tshirtSize || 'M',
-                    foodPreference: foodPreference || 'Veg',
-                    linkedin: '',
-                    role: 'participant',
-                    paymentStatus: paymentStatus,
-                    amountPaid: 0,
-                    checkedIn: false,
-                    profileCompleted: true,
-                    createdAt: new Date().toISOString()
-                });
-            }
-            else {
-                await db_1.Users.updateOne(targetUser.id, {
-                    paymentStatus: paymentStatus,
-                    amountPaid: 0,
-                    phone: phone || targetUser.phone || leader.phone,
-                    college: college || targetUser.college || leader.college,
-                    rollNumber: rollNumber || targetUser.rollNumber || '',
-                    branch: branch || targetUser.branch || 'Unknown',
-                    year: year || targetUser.year || '1st Year',
-                    gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
-                    tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
-                    foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
-                    profileCompleted: true
-                });
-            }
-            await db_1.Users.updateOne(targetUser.id, { teamId: team.id, teamRole: 'member', role: 'participant' });
-            if (!team.members.includes(targetUser.id)) {
-                team.members.push(targetUser.id);
-            }
-            addedUsers.push(targetUser);
-            // Send email to each added member
-            try {
-                const completeLink = `${FRONTEND_BASE_URL}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
-                await transporter.sendMail({
-                    from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-                    to: targetUser.email,
-                    subject: 'You\'ve been added to a team - CodeSprint 2026',
-                    html: `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;border:1px solid #e2e8f0;border-radius:12px;">
-            <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
-            <p>Dear <strong>${targetUser.name}</strong>,</p>
-            <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong>.</p>
-            <p>Your registration status is: <strong>${paymentStatus === 'paid' ? 'Paid & Active' : 'Pending Payment'}</strong>.</p>
-            <div style="text-align:center;margin:24px 0;">
-              <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
-            </div>
-          </div>`
-                });
-            }
-            catch (err) {
-                console.error('Email send failed for', m.email, err);
-            }
-        }
-        // Update team membership count
-        await db_1.Teams.updateOne(team.id, {
-            members: team.members,
-            remainingSlots: Math.max(0, 5 - team.members.length),
-            status: team.members.length >= 5 ? 'full' : 'open'
-        });
-        const updatedTeam = await db_1.Teams.findOne({ id: team.id });
-        return res.json({ success: true, message: `${addedUsers.length} member(s) added successfully.`, team: updatedTeam });
-    }
-    // ── SINGLE MEMBER MODE (legacy / backwards compat) ──
-    const { name, email, phone, rollNumber, college, branch, year, gender, tshirtSize, foodPreference } = req.body;
-    if (!name || !email) {
-        return res.status(400).json({ message: 'Name and Email are required.' });
-    }
-    if (team.members.length >= 5) {
-        return res.status(400).json({ message: 'Your team already has the maximum of 5 members.' });
-    }
-    let targetUser = await db_1.Users.findOne({ email: email.toLowerCase() });
-    if (targetUser && targetUser.teamId) {
-        return res.status(400).json({ message: 'This user is already in a team.' });
-    }
-    const paymentStatus = availablePaidSlots > 0 ? 'paid' : 'pending';
-    if (!targetUser) {
-        targetUser = await db_1.Users.create({
-            id: `u_${Math.random().toString(36).substring(2, 9)}`,
-            name, email: email.toLowerCase(),
-            phone: phone || leader.phone, college: college || leader.college,
-            rollNumber: rollNumber || '', branch: branch || 'Unknown',
-            year: year || '1st Year', gender: (gender && String(gender).trim()) ? String(gender).trim() : 'Male',
-            tshirtSize: tshirtSize || 'M', foodPreference: foodPreference || 'Veg',
-            linkedin: '', role: 'participant', paymentStatus: paymentStatus,
-            amountPaid: 0, checkedIn: false,
-            profileCompleted: true, createdAt: new Date().toISOString()
-        });
-    }
-    else {
-        await db_1.Users.updateOne(targetUser.id, {
-            paymentStatus: paymentStatus, amountPaid: 0,
-            phone: phone || targetUser.phone || leader.phone,
-            college: college || targetUser.college || leader.college,
-            rollNumber: rollNumber || targetUser.rollNumber || '',
-            branch: branch || targetUser.branch || 'Unknown',
-            year: year || targetUser.year || '1st Year',
-            gender: (gender && String(gender).trim()) ? String(gender).trim() : (targetUser.gender || 'Male'),
-            tshirtSize: tshirtSize || targetUser.tshirtSize || 'M',
-            foodPreference: foodPreference || targetUser.foodPreference || 'Veg',
-            profileCompleted: true
-        });
-    }
-    await db_1.Users.updateOne(targetUser.id, { teamId: team.id, teamRole: 'member', role: 'participant' });
-    if (!team.members.includes(targetUser.id)) {
-        const updatedMembers = [...team.members, targetUser.id];
-        await db_1.Teams.updateOne(team.id, {
-            members: updatedMembers,
-            remainingSlots: Math.max(0, 5 - updatedMembers.length),
-            status: updatedMembers.length >= 5 ? 'full' : 'open'
-        });
-    }
-    try {
-        const completeLink = `${FRONTEND_BASE_URL}/register?email=${encodeURIComponent(targetUser.email)}&name=${encodeURIComponent(targetUser.name)}`;
-        await transporter.sendMail({
-            from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-            to: targetUser.email,
-            subject: 'Complete Your Registration - CodeSprint 2026',
-            html: `<div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;border:1px solid #e2e8f0;border-radius:12px;">
-        <h1 style="color:#6d28d9;">CodeSprint 2026</h1>
-        <p>Dear <strong>${targetUser.name}</strong>,</p>
-        <p>Your team leader <strong>${leader.name}</strong> has added you to team <strong>${team.name}</strong> for CodeSprint 2026.</p>
-        <p>Your registration status is: <strong>${paymentStatus === 'paid' ? 'Paid & Active' : 'Pending Payment'}</strong>.</p>
-        <div style="text-align:center;margin:24px 0;">
-          <a href="${completeLink}" style="background:#6d28d9;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Complete Your Profile</a>
-        </div>
-      </div>`
-        });
-    }
-    catch (err) {
-        console.error('Failed to send confirmation email:', err);
-    }
-    const updatedTeam = await db_1.Teams.findOne({ id: team.id });
-    return res.json({ success: true, message: 'Member added successfully.', team: updatedTeam });
+    return res.status(400).json({ message: 'Adding team members directly by team leaders has been disabled.' });
 });
 // 2. Request to Join a Team
 router.post('/teams/join-request', exports.authenticateToken, async (req, res) => {
