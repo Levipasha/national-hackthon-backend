@@ -1624,13 +1624,18 @@ router.post('/payments/create-order', authenticateToken, async (req: AuthRequest
     }
 
     if (user) {
-      if (user.role === 'team-leader' && user.teamId) {
+      if ((user.role === 'team-leader' || user.teamRole === 'leader') && user.teamId) {
         const team = await Teams.findOne({ id: user.teamId });
         if (team) {
-          // Calculate amount only for members who have NOT paid yet
+          // Calculate amount for all members who have NOT paid yet
           const unpaidMembers = await Users.find(u => u.teamId === team.id && u.paymentStatus !== 'paid');
-          expectedAmount = unpaidMembers.length * 399;
+          const countToPay = unpaidMembers.length > 0 ? unpaidMembers.length : 1;
+          expectedAmount = countToPay * 399;
         }
+      } else if (user.teamId && user.teamRole === 'member') {
+        return res.status(400).json({ 
+          message: 'Team registration payment is managed by your Team Leader. Please ask your Team Leader to log in and complete payment for the team.' 
+        });
       } else {
         expectedAmount = 399;
       }
