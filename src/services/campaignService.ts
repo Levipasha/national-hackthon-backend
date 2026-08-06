@@ -324,7 +324,7 @@ export async function sendCampaignMail2(): Promise<{ sentCount: number; failedCo
 }
 
 /**
- * Schedule automated campaign for tomorrow 03/08/2026 (09:00 AM Mail 1, 09:10 AM Mail 2)
+ * Schedule automated campaign for 03/08/2026 (09:00 AM Mail 1, 09:10 AM Mail 2)
  */
 export function scheduleAug3Campaign() {
   if (mail1ScheduledTimer) clearTimeout(mail1ScheduledTimer);
@@ -338,36 +338,47 @@ export function scheduleAug3Campaign() {
   // Target Mail 2: 03/08/2026 09:10:00 AM IST (UTC+05:30)
   const targetMail2 = new Date('2026-08-03T09:10:00+05:30');
 
+  const expiryCutoff = new Date(targetMail2.getTime() + 15 * 60 * 1000);
+
+  // If campaign date has already passed (e.g. today is past August 3, 2026), log status and exit cleanly
+  if (now > expiryCutoff) {
+    console.log('[Campaign Scheduler] Scheduled campaign date (03/08/2026) has already passed. Standby mode.');
+    return;
+  }
+
   const delayMail1 = targetMail1.getTime() - now.getTime();
   const delayMail2 = targetMail2.getTime() - now.getTime();
 
   console.log(`[Campaign Scheduler] Initialized for 03/08/2026.`);
-  console.log(`  - Mail 1 (Guidelines PDF) scheduled at: 09:00 AM IST (in ${Math.round(delayMail1 / 1000 / 60)} minutes)`);
-  console.log(`  - Mail 2 (WhatsApp Group) scheduled at: 09:10 AM IST (in ${Math.round(delayMail2 / 1000 / 60)} minutes)`);
-
   if (delayMail1 > 0) {
+    console.log(`  - Mail 1 (Guidelines PDF) scheduled at: 09:00 AM IST (in ${Math.round(delayMail1 / 1000 / 60)} minutes)`);
     mail1ScheduledTimer = setTimeout(async () => {
       await sendCampaignMail1();
     }, delayMail1);
   }
 
   if (delayMail2 > 0) {
+    console.log(`  - Mail 2 (WhatsApp Group) scheduled at: 09:10 AM IST (in ${Math.round(delayMail2 / 1000 / 60)} minutes)`);
     mail2ScheduledTimer = setTimeout(async () => {
       await sendCampaignMail2();
     }, delayMail2);
   }
 
-  // Backup Cron interval checker running every 30 seconds to guarantee triggering even if timers drift
-  setInterval(async () => {
+  // Backup interval checker (clears itself when target window passes)
+  const backupInterval = setInterval(async () => {
     const currentTime = new Date();
+    if (currentTime > expiryCutoff) {
+      clearInterval(backupInterval);
+      return;
+    }
     
-    // Check Mail 1 window (between 09:00 AM and 09:05 AM on 03/08/2026)
+    // Check Mail 1 window (between 09:00 AM and 09:05 AM)
     if (!campaignStatus.mail1Sent && currentTime >= targetMail1 && currentTime < new Date(targetMail1.getTime() + 10 * 60 * 1000)) {
       console.log(`[Campaign Backup Scheduler] Triggering Mail 1...`);
       await sendCampaignMail1();
     }
 
-    // Check Mail 2 window (between 09:10 AM and 09:15 AM on 03/08/2026)
+    // Check Mail 2 window (between 09:10 AM and 09:15 AM)
     if (!campaignStatus.mail2Sent && currentTime >= targetMail2 && currentTime < new Date(targetMail2.getTime() + 10 * 60 * 1000)) {
       console.log(`[Campaign Backup Scheduler] Triggering Mail 2...`);
       await sendCampaignMail2();
