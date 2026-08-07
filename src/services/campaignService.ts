@@ -36,8 +36,8 @@ export interface RecipientMailLog {
 const recipientMailLogs: Record<string, RecipientMailLog> = {};
 
 export async function getCampaignRecipientsList(): Promise<RecipientMailLog[]> {
-  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
-  return allUsers.map(user => {
+  const allUsers = await Users.find((u: any) => u.role !== 'admin' && Boolean(u.email));
+  return allUsers.map((user: any) => {
     const log = recipientMailLogs[user.id];
     const isSentInSession = sentCampaignLogs[`mail2_${user.id}_${user.email}`];
     return {
@@ -304,7 +304,7 @@ export async function scheduleNewUserWelcomeSequence(user: { id?: string; name: 
  * Executes Broadcast Campaign Mail 1 (Guidelines PDF) to all existing registered participants
  */
 export async function sendCampaignMail1(): Promise<{ sentCount: number; failedCount: number }> {
-  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
+  const allUsers = await Users.find((u: any) => u.role !== 'admin' && Boolean(u.email));
   let sentCount = 0;
   let failedCount = 0;
 
@@ -364,7 +364,7 @@ export async function sendCampaignMail2(force: boolean = false): Promise<{ succe
   // Record this run in history
   dailyRunsHistory.push(new Date().toISOString());
 
-  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
+  const allUsers = await Users.find((u: any) => u.role !== 'admin' && Boolean(u.email));
 
   if (force) {
     Object.keys(sentCampaignLogs).forEach(k => {
