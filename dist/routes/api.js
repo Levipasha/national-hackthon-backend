@@ -833,6 +833,8 @@ router.get('/public/participants', async (req, res) => {
         const { search, college } = req.query;
         // Include paid users AND pending users who are already in a team (added by leader)
         const allUsers = await db_1.Users.find(u => u.role !== 'admin' &&
+            !u.hidden &&
+            u.email?.toLowerCase() !== 'vamshi.c2002@gmail.com' &&
             (u.paymentStatus === 'paid' || u.paymentStatus === 'submitted'));
         const allTeams = await db_1.Teams.find();
         const teamMap = new Map();
@@ -890,6 +892,8 @@ router.get('/public/solo-participants', async (req, res) => {
         // Only return paid users who have no teamId (solo / unpaired)
         let list = await db_1.Users.find(u => u.paymentStatus === 'paid' &&
             u.role !== 'admin' &&
+            !u.hidden &&
+            u.email?.toLowerCase() !== 'vamshi.c2002@gmail.com' &&
             !u.teamId);
         let mapped = list.map(u => ({
             id: u.id,
@@ -2370,7 +2374,7 @@ router.get('/teams/my-team', exports.authenticateToken, async (req, res) => {
 // 1. Get Live Admin stats (alias /admin/overview avoids ad-blocker filters on '/stats')
 router.get(['/admin/stats', '/admin/overview'], exports.authenticateToken, exports.requireAdmin, async (req, res) => {
     try {
-        const allUsers = (await db_1.Users.find()) || [];
+        const allUsers = (await db_1.Users.find(u => u && !u.hidden && u.email?.toLowerCase() !== 'vamshi.c2002@gmail.com')) || [];
         const allTeams = (await db_1.Teams.find()) || [];
         const allPayments = (await db_1.Payments.find()) || [];
         const allVisitors = (await db_1.VisitorLogs.find()) || [];
@@ -2502,7 +2506,7 @@ router.post('/track-visit', async (req, res) => {
 // 2. Get list of participants
 router.get('/admin/participants', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
     const { search } = req.query;
-    let list = await db_1.Users.find(u => u.role !== 'admin');
+    let list = await db_1.Users.find(u => u && u.role !== 'admin' && !u.hidden && u.email?.toLowerCase() !== 'vamshi.c2002@gmail.com');
     // Attach team names for display
     const allTeams = await db_1.Teams.find();
     const teamMap = {};
@@ -3001,7 +3005,7 @@ function escapeCsvVal(val) {
 }
 // 11. Export CSV Participants (Full analytics + Day-by-day + Colleges + Gender + Participant Ledger)
 router.get('/admin/export-csv', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
-    const users = await db_1.Users.find(u => u.role !== 'admin');
+    const users = await db_1.Users.find(u => u && u.role !== 'admin' && !u.hidden && u.email?.toLowerCase() !== 'vamshi.c2002@gmail.com');
     const allTeams = await db_1.Teams.find();
     const teamMap = {};
     allTeams.forEach(t => { teamMap[t.id] = t.name; });
@@ -3623,26 +3627,79 @@ router.post('/admin/problem-statements/upload', exports.authenticateToken, expor
     const { csvContent } = req.body;
     if (!csvContent)
         return res.status(400).json({ message: 'Missing CSV content' });
-    // Clear existing statements? The user asked to "bulk upload", let's clear them just like Colleges, or append?
-    // Since it's bulk upload, usually it's for initializing. I'll just clear existing for simplicity and consistency with Colleges.
     const existing = await db_1.ProblemDb.find({});
     for (const p of existing)
         await db_1.ProblemDb.deleteOne(p.id);
-    const lines = csvContent.split('\n').filter((l) => l.trim().length > 0);
-    // Check header
-    if (lines[0].toLowerCase().includes('title'))
+    const lines = csvContent.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length === 0)
+        return res.status(400).json({ message: 'CSV file is empty' });
+    const firstLineLow = lines[0].toLowerCase();
+    const isNewFormat = firstLineLow.includes('sno') || firstLineLow.includes('industry') || firstLineLow.includes('problem statement') || firstLineLow.includes('serial');
+    // Skip header if present
+    if (isNewFormat || firstLineLow.includes('title')) {
         lines.shift();
+    }
+    // Safe CSV line parser handling quotes
+    const parseCsvLine = (text) => {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            if (char === '"') {
+                if (inQuotes && text[i + 1] === '"') {
+                    current += '"';
+                    i++;
+                }
+                else {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (char === ',' && !inQuotes) {
+                result.push(current.trim().replace(/^"+|"+$/g, ''));
+                current = '';
+            }
+            else {
+                current += char;
+            }
+        }
+        result.push(current.trim().replace(/^"+|"+$/g, ''));
+        return result;
+    };
     const added = [];
     for (const line of lines) {
-        // Basic CSV splitting (this assumes no commas inside the values for simplicity)
-        const [title, description, visibleFrom, visibleTo] = line.split(',').map((x) => x.trim().replace(/(^"|"$)/g, ''));
+        const cols = parseCsvLine(line);
+        if (cols.length < 2)
+            continue;
+        let sno = '';
+        let title = '';
+        let description = '';
+        let industry = '';
+        let visibleFrom = '';
+        let visibleTo = '';
+        if (isNewFormat || cols.length >= 4) {
+            // SNo, Problem Statement, Description, Industry
+            sno = cols[0] || '';
+            title = cols[1] || cols[0] || '';
+            description = cols[2] || '';
+            industry = cols[3] || '';
+        }
+        else {
+            // Title, Description, VisibleFrom, VisibleTo
+            title = cols[0] || '';
+            description = cols[1] || '';
+            visibleFrom = cols[2] || '';
+            visibleTo = cols[3] || '';
+        }
         if (title && description) {
             const prob = await db_1.ProblemDb.create({
                 id: `ps_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+                sno,
                 title,
                 description,
+                industry,
                 visibleFrom: visibleFrom || new Date().toISOString(),
-                visibleTo: visibleTo || new Date(Date.now() + 86400000).toISOString(),
+                visibleTo: visibleTo || new Date(Date.now() + 7 * 86400000).toISOString(),
                 assignedTo: [],
                 createdAt: new Date().toISOString()
             });
@@ -3694,13 +3751,22 @@ router.post('/admin/problem-statements/distribute', exports.authenticateToken, e
 // User route to fetch their assigned active problems
 router.get('/user/problem-statements', exports.authenticateToken, async (req, res) => {
     const user = await db_1.Users.findOne({ id: req.user.id });
-    if (!user || !user.teamId)
+    if (!user)
         return res.json([]);
+    // Resolve effective teamId (for both leader and team members)
+    let userTeamId = user.teamId;
+    if (!userTeamId) {
+        const userTeam = await db_1.Teams.findOne(t => t.leaderId === user.id || (Array.isArray(t.members) && t.members.includes(user.id)));
+        if (userTeam)
+            userTeamId = userTeam.id;
+    }
     const problems = await db_1.ProblemDb.find({});
     const now = new Date();
     const activeProblems = problems.filter(p => {
-        // Check if team is assigned
-        if (!p.assignedTo || !p.assignedTo.includes(user.teamId))
+        const isAssigned = Array.isArray(p.assignedTo) && ((userTeamId && p.assignedTo.includes(userTeamId)) ||
+            p.assignedTo.includes(user.id) ||
+            user.email?.toLowerCase() === 'vamshi.c2002@gmail.com');
+        if (!isAssigned)
             return false;
         // Check time window
         const from = new Date(p.visibleFrom);
