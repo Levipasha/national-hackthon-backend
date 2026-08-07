@@ -4,6 +4,9 @@ dist/
 .env.local
 .DS_Store
 
+# Exclude db.ts per user request
+src/config/db.ts
+
 # One-off maintenance & diagnostic scripts
 src/scripts/
 check_*.js
@@ -13,5 +16,9 @@ insert_*.js
 inspect_*.js
 update_*.js
 fix_*.js
+assign_*.js
+test_*.js
+verify_*.js
+
 
 

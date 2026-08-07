@@ -2947,6 +2947,33 @@ router.post('/admin/notifications/send', exports.authenticateToken, exports.requ
     console.log(`[BROADCAST] Target: ${recipientType} (${recipientTarget || 'ALL'}). Message: ${message}`);
     return res.json({ success: true, message: `Notification Banner successfully dispatched!`, notification });
 });
+// Admin: Trigger Bulk WhatsApp Group Invitation Emails
+router.post('/admin/campaign/send-whatsapp-bulk', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    try {
+        const { force } = req.body;
+        const result = await (0, campaignService_1.sendCampaignMail2)(Boolean(force));
+        return res.json(result);
+    }
+    catch (err) {
+        console.error('[Admin Bulk Mail Error]:', err);
+        return res.status(500).json({ message: err.message || 'Failed to start bulk mail campaign.' });
+    }
+});
+// Admin: Get Bulk Campaign Status & Real-time Progress
+router.get('/admin/campaign/status', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    return res.json({ success: true, campaignStatus: (0, campaignService_1.getCampaignStatusWithDailyLimit)() });
+});
+// Admin: Get Full Recipient List with Real-time Verification Status (Sent / Failed / Pending)
+router.get('/admin/campaign/recipients', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    try {
+        const recipients = await (0, campaignService_1.getCampaignRecipientsList)();
+        return res.json({ success: true, recipients, campaignStatus: (0, campaignService_1.getCampaignStatusWithDailyLimit)() });
+    }
+    catch (err) {
+        console.error('[Admin Recipients Fetch Error]:', err);
+        return res.status(500).json({ message: err.message || 'Failed to fetch campaign recipients.' });
+    }
+});
 // Helper for safe date parsing and formatting YYYY-MM-DD
 function safeFormatDateKey(val) {
     if (!val)

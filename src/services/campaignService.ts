@@ -23,6 +23,43 @@ const sentCampaignLogs: { [key: string]: boolean } = {};
 let mail1ScheduledTimer: NodeJS.Timeout | null = null;
 let mail2ScheduledTimer: NodeJS.Timeout | null = null;
 
+export interface RecipientMailLog {
+  userId: string;
+  name: string;
+  email: string;
+  college: string;
+  status: 'sent' | 'failed' | 'pending';
+  sentAt?: string;
+  error?: string;
+}
+
+const recipientMailLogs: Record<string, RecipientMailLog> = {};
+
+export async function getCampaignRecipientsList(): Promise<RecipientMailLog[]> {
+  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
+  return allUsers.map(user => {
+    const log = recipientMailLogs[user.id];
+    const isSentInSession = sentCampaignLogs[`mail2_${user.id}_${user.email}`];
+    return {
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      college: user.college || 'N/A',
+      status: log?.status || (isSentInSession ? 'sent' : 'pending'),
+      sentAt: log?.sentAt || (isSentInSession ? (campaignStatus.mail2LastRun || undefined) : undefined),
+      error: log?.error
+    };
+  });
+}
+
+const MAX_DAILY_BULK_RUNS = 2;
+const dailyRunsHistory: string[] = [];
+
+export function getTodayBulkRunsCount(): number {
+  const todayStr = new Date().toISOString().split('T')[0];
+  return dailyRunsHistory.filter(ts => ts.startsWith(todayStr)).length;
+}
+
 export let campaignStatus = {
   mail1ScheduledTime: '2026-08-03T09:00:00+05:30',
   mail2ScheduledTime: '2026-08-03T09:10:00+05:30',
@@ -32,7 +69,27 @@ export let campaignStatus = {
   mail2SentCount: 0,
   mail1LastRun: null as string | null,
   mail2LastRun: null as string | null,
+
+  // Live broadcast campaign status tracking
+  inProgress: false,
+  processedCount: 0,
+  totalCount: 0,
+  sentCount: 0,
+  failedCount: 0,
+  lastError: null as string | null,
+  startedAt: null as string | null,
+  completedAt: null as string | null,
 };
+
+export function getCampaignStatusWithDailyLimit() {
+  const runsToday = getTodayBulkRunsCount();
+  return {
+    ...campaignStatus,
+    runsToday,
+    maxDailyRuns: MAX_DAILY_BULK_RUNS,
+    canRunToday: runsToday < MAX_DAILY_BULK_RUNS
+  };
+}
 
 /**
  * Stage 1 Email Template: Registration Confirmation
@@ -286,41 +343,113 @@ export async function sendCampaignMail1(): Promise<{ sentCount: number; failedCo
 /**
  * Executes Broadcast Campaign Mail 2 (WhatsApp Group Link) to all existing registered participants
  */
-export async function sendCampaignMail2(): Promise<{ sentCount: number; failedCount: number }> {
-  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
-  let sentCount = 0;
-  let failedCount = 0;
-
-  console.log(`[Campaign Mail 2 - WhatsApp Group] Starting broadcast to ${allUsers.length} registered participants...`);
-
-  for (const user of allUsers) {
-    const logKey = `mail2_${user.id}_${user.email}`;
-    if (sentCampaignLogs[logKey]) continue;
-
-    try {
-      const template = getWhatsAppEmailTemplate(user.name);
-      await transporter.sendMail({
-        from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-        to: user.email,
-        subject: template.subject,
-        html: template.html
-      });
-      sentCampaignLogs[logKey] = true;
-      sentCount++;
-      // Wait 1 second between email sends to prevent hitting SMTP rate limits
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (err) {
-      console.error(`[Campaign Mail 2 Error] Failed to send to ${user.email}:`, err);
-      failedCount++;
-    }
+export async function sendCampaignMail2(force: boolean = false): Promise<{ success: boolean; message: string; campaignStatus: any }> {
+  if (campaignStatus.inProgress) {
+    return {
+      success: false,
+      message: `Campaign is already in progress (${campaignStatus.sentCount}/${campaignStatus.totalCount} sent).`,
+      campaignStatus: getCampaignStatusWithDailyLimit()
+    };
   }
 
-  campaignStatus.mail2Sent = true;
-  campaignStatus.mail2SentCount = sentCount;
-  campaignStatus.mail2LastRun = new Date().toISOString();
+  const runsToday = getTodayBulkRunsCount();
+  if (runsToday >= MAX_DAILY_BULK_RUNS) {
+    return {
+      success: false,
+      message: `Daily limit reached! Bulk emails can only be sent up to ${MAX_DAILY_BULK_RUNS} times per day (${runsToday}/${MAX_DAILY_BULK_RUNS} dispatches used today). Please try again tomorrow.`,
+      campaignStatus: getCampaignStatusWithDailyLimit()
+    };
+  }
 
-  console.log(`[Campaign Mail 2 Completed] Sent: ${sentCount}, Failed: ${failedCount}`);
-  return { sentCount, failedCount };
+  // Record this run in history
+  dailyRunsHistory.push(new Date().toISOString());
+
+  const allUsers = await Users.find(u => u.role !== 'admin' && Boolean(u.email));
+
+  if (force) {
+    Object.keys(sentCampaignLogs).forEach(k => {
+      if (k.startsWith('mail2_')) delete sentCampaignLogs[k];
+    });
+  }
+
+  campaignStatus.inProgress = true;
+  campaignStatus.startedAt = new Date().toISOString();
+  campaignStatus.completedAt = null;
+  campaignStatus.lastError = null;
+  campaignStatus.totalCount = allUsers.length;
+  campaignStatus.processedCount = 0;
+  campaignStatus.sentCount = 0;
+  campaignStatus.failedCount = 0;
+
+  console.log(`[Campaign Mail 2 - WhatsApp Group] Starting background broadcast to ${allUsers.length} registered participants...`);
+
+  // Run sending sequence asynchronously in background
+  (async () => {
+    try {
+      for (const user of allUsers) {
+        const logKey = `mail2_${user.id}_${user.email}`;
+        if (!force && sentCampaignLogs[logKey]) {
+          campaignStatus.processedCount++;
+          campaignStatus.sentCount++;
+          continue;
+        }
+
+        try {
+          const template = getWhatsAppEmailTemplate(user.name);
+          await transporter.sendMail({
+            from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
+            to: user.email,
+            subject: template.subject,
+            html: template.html
+          });
+          sentCampaignLogs[logKey] = true;
+          campaignStatus.sentCount++;
+          recipientMailLogs[user.id] = {
+            userId: user.id,
+            name: user.name,
+            email: user.email,
+            college: user.college || 'N/A',
+            status: 'sent',
+            sentAt: new Date().toISOString()
+          };
+        } catch (err: any) {
+          console.error(`[Campaign Mail 2 Error] Failed to send to ${user.email}:`, err);
+          campaignStatus.failedCount++;
+          campaignStatus.lastError = err?.message || 'SMTP delivery failure';
+          recipientMailLogs[user.id] = {
+            userId: user.id,
+            name: user.name,
+            email: user.email,
+            college: user.college || 'N/A',
+            status: 'failed',
+            error: err?.message || 'SMTP delivery failure'
+          };
+        } finally {
+          campaignStatus.processedCount++;
+        }
+
+        // Wait 1 second between email sends to respect SMTP rate limits
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      campaignStatus.mail2Sent = true;
+      campaignStatus.mail2SentCount = campaignStatus.sentCount;
+      campaignStatus.mail2LastRun = new Date().toISOString();
+      campaignStatus.completedAt = new Date().toISOString();
+      console.log(`[Campaign Mail 2 Completed] Sent: ${campaignStatus.sentCount}, Failed: ${campaignStatus.failedCount}`);
+    } catch (err: any) {
+      console.error('[Campaign Mail 2 Fatal Error]:', err);
+      campaignStatus.lastError = err?.message || 'Fatal execution error';
+    } finally {
+      campaignStatus.inProgress = false;
+    }
+  })();
+
+  return {
+    success: true,
+    message: `Broadcast email campaign started for ${allUsers.length} registered participants.`,
+    campaignStatus
+  };
 }
 
 /**
