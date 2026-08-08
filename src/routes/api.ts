@@ -944,6 +944,40 @@ router.get('/public/teams', async (req: Request, res: Response) => {
   return res.json(filtered);
 });
 
+// Get Master Team Problem Statement Allocations
+router.get('/public/problem-assignments', async (req: Request, res: Response) => {
+  try {
+    const teams = await Teams.find({});
+    const problems = await ProblemDb.find({});
+    const users = await Users.find({});
+    
+    const assignments = teams.map(team => {
+      let leader = users.find(u => u.id === team.leaderId || (u.teamId === team.id && (u.role === 'team-leader' || u.teamRole === 'leader')));
+      const assignedProblems = problems.filter(p => Array.isArray(p.assignedTo) && p.assignedTo.includes(team.id));
+      return {
+        teamId: team.id,
+        teamName: team.name,
+        leaderName: leader ? leader.name : (team.leaderName || 'Team Leader'),
+        college: leader ? (leader.college || 'Audisankara University') : (team.college || 'Audisankara University'),
+        memberCount: Array.isArray(team.members) ? team.members.length + 1 : 1,
+        problems: assignedProblems.map(p => ({
+          sno: p.sno,
+          id: p.id,
+          title: p.title,
+          industry: p.industry,
+          description: p.description
+        }))
+      };
+    });
+
+    assignments.sort((a, b) => a.teamId.localeCompare(b.teamId));
+    res.json(assignments);
+  } catch (err: any) {
+    console.error('Error fetching public problem assignments:', err);
+    res.status(500).json({ error: 'Failed to fetch team problem assignments' });
+  }
+});
+
 // 2. Get distinct college names that are participating
 router.get('/public/colleges', async (req: Request, res: Response) => {
   const dbColleges = await CollegesDb.find({});
