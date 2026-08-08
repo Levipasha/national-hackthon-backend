@@ -3764,8 +3764,7 @@ router.get('/user/problem-statements', exports.authenticateToken, async (req, re
     const now = new Date();
     const activeProblems = problems.filter(p => {
         const isAssigned = Array.isArray(p.assignedTo) && ((userTeamId && p.assignedTo.includes(userTeamId)) ||
-            p.assignedTo.includes(user.id) ||
-            user.email?.toLowerCase() === 'vamshi.c2002@gmail.com');
+            p.assignedTo.includes(user.id));
         if (!isAssigned)
             return false;
         // Check time window
