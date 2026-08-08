@@ -957,8 +957,8 @@ router.get('/public/problem-assignments', async (req: Request, res: Response) =>
       return {
         teamId: team.id,
         teamName: team.name,
-        leaderName: leader ? leader.name : (team.leaderName || 'Team Leader'),
-        college: leader ? (leader.college || 'Audisankara University') : (team.college || 'Audisankara University'),
+        leaderName: leader ? leader.name : ((team as any).leaderName || 'Team Leader'),
+        college: leader ? (leader.college || 'Audisankara University') : ((team as any).college || 'Audisankara University'),
         memberCount: Array.isArray(team.members) ? team.members.length + 1 : 1,
         problems: assignedProblems.map(p => ({
           sno: p.sno,
