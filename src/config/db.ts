@@ -34,6 +34,9 @@ export interface User {
   profileCompleted?: boolean;
   collegeUpdatedByLeader?: boolean;
   hidden?: boolean;
+  problemSno?: string;
+  problemTitle?: string;
+  problemId?: string;
   createdAt: string;
 }
 
@@ -54,6 +57,9 @@ export interface Team {
   paymentStatus?: 'pending' | 'paid';
   inviteLink: string;
   qrCodeDataUrl?: string;
+  problemSno?: string;
+  problemTitle?: string;
+  problemId?: string;
   joinRequests: { 
     userId: string; 
     name: string; 

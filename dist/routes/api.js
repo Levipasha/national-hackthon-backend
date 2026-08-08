@@ -264,16 +264,7 @@ const handleTeamPaymentSuccess = async (teamId, paymentId, totalAmountPaid, paye
                   Your slot is fully confirmed, and your registration fee is covered.
                 </p>
                 
-                <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px;">
-                  Please join the official event WhatsApp group to receive further instructions and updates:
-                </p>
-      
-                <div style="background-color: #f8fafc; border-left: 4px solid #22c55e; padding: 20px; border-radius: 4px; margin-bottom: 30px;">
-                  <p style="color: #0f172a; font-weight: 600; margin-top: 0; margin-bottom: 15px; font-size: 15px;">Please join in this group 👇</p>
-                  <a href="https://chat.whatsapp.com/IA1BaLQ7gpu46RrbEz7mN7" style="display: inline-block; background-color: #22c55e; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 2px 4px rgba(34, 197, 94, 0.3);">
-                    Join WhatsApp Group
-                  </a>
-                </div>
+
                 
                 <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
                   You can now log in to your dashboard to view your team details and event schedule.
@@ -1656,16 +1647,7 @@ router.post('/payments/verify', exports.authenticateToken, async (req, res) => {
             This event, hosted by Audisankara University, aims to provide you with valuable exposure, enhance your technical skills, and connect you with like-minded peers.
           </p>
           
-          <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 25px;">
-            Further details and instructions will be shared with you through the official WhatsApp group. We kindly request you to stay active in the group and follow the updates regularly.
-          </p>
 
-          <div style="background-color: #f8fafc; border-left: 4px solid #22c55e; padding: 20px; border-radius: 4px; margin-bottom: 30px;">
-            <p style="color: #0f172a; font-weight: 600; margin-top: 0; margin-bottom: 15px; font-size: 15px;">Please join in this group 👇</p>
-            <a href="https://chat.whatsapp.com/IA1BaLQ7gpu46RrbEz7mN7" style="display: inline-block; background-color: #22c55e; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 2px 4px rgba(34, 197, 94, 0.3);">
-              Join WhatsApp Group
-            </a>
-          </div>
           
           <p style="color: #334155; font-size: 16px; line-height: 1.6; margin-bottom: 30px;">
             Once again, thank you for your registration. We look forward to your active participation and wish you a rewarding experience at CodeSprint 2026.
@@ -1686,43 +1668,7 @@ router.post('/payments/verify', exports.authenticateToken, async (req, res) => {
     catch (err) {
         console.error('Failed to send registration confirmation email:', err);
     }
-    // Schedule automated drip (Stage 2: +2 min Guidelines PDF, Stage 3: +10 min gap WhatsApp Link)
-    try {
-        // Stage 1 registration confirmation email was sent above; schedule Stage 2 and Stage 3
-        setTimeout(async () => {
-            try {
-                const t2 = (0, campaignService_1.getGuidelinesEmailTemplate)(user.name);
-                await transporter.sendMail({
-                    from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-                    to: user.email,
-                    subject: t2.subject,
-                    html: t2.html
-                });
-                console.log(`[Drip] Stage 2 (Guidelines PDF) sent to ${user.email} after 2 min delay.`);
-            }
-            catch (err) {
-                console.error(`[Drip Error] Stage 2 to ${user.email}:`, err);
-            }
-        }, 2 * 60 * 1000);
-        setTimeout(async () => {
-            try {
-                const t3 = (0, campaignService_1.getWhatsAppEmailTemplate)(user.name);
-                await transporter.sendMail({
-                    from: '"CodeSprint 2026" <administrator@audisankara.ac.in>',
-                    to: user.email,
-                    subject: t3.subject,
-                    html: t3.html
-                });
-                console.log(`[Drip] Stage 3 (WhatsApp Group) sent to ${user.email} after 10 min gap.`);
-            }
-            catch (err) {
-                console.error(`[Drip Error] Stage 3 to ${user.email}:`, err);
-            }
-        }, 12 * 60 * 1000);
-    }
-    catch (dripErr) {
-        console.error('[Drip Schedule Error]:', dripErr);
-    }
+    // Automated drip disabled (Guidelines PDF & WhatsApp link removed)
     const updatedUser = await db_1.Users.findOne({ id: user.id });
     return res.json({ success: true, message: 'Payment completed successfully', user: updatedUser });
 });
@@ -2402,6 +2348,72 @@ router.get('/teams/my-team', exports.authenticateToken, async (req, res) => {
         joinRequests: enrichedRequests
     });
 });
+// Update Team Problem Statement Serial Number (SNO) - Leader or Team Member
+router.post('/teams/update-problem-sno', exports.authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user?.id;
+        if (!userId)
+            return res.status(401).json({ message: 'Unauthorized' });
+        const user = await db_1.Users.findOne({ id: userId });
+        if (!user)
+            return res.status(404).json({ message: 'User not found' });
+        let team = null;
+        if (user.teamId) {
+            team = await db_1.Teams.findOne({ id: user.teamId });
+        }
+        if (!team) {
+            team = await db_1.Teams.findOne(t => t.leaderId === userId || (Array.isArray(t.members) && t.members.includes(userId)));
+        }
+        if (!team) {
+            return res.status(400).json({ message: 'You must belong to a team to set a problem statement serial number.' });
+        }
+        const { problemSno, sno } = req.body || {};
+        const inputSno = (problemSno || sno || '').toString().trim();
+        if (!inputSno) {
+            return res.status(400).json({ message: 'Problem Statement Serial Number is required.' });
+        }
+        const problems = await db_1.ProblemDb.find({});
+        const matchedProblem = problems.find(p => String(p.sno || '').trim().toLowerCase() === inputSno.toLowerCase() ||
+            String(p.id || '').trim().toLowerCase() === inputSno.toLowerCase());
+        const updateData = {
+            problemSno: matchedProblem ? String(matchedProblem.sno) : inputSno,
+            problemTitle: matchedProblem ? matchedProblem.title : (team.problemTitle || ''),
+            problemId: matchedProblem ? matchedProblem.id : (team.problemId || '')
+        };
+        await db_1.Teams.updateOne(team.id, updateData);
+        if (matchedProblem) {
+            for (const p of problems) {
+                if (Array.isArray(p.assignedTo) && p.assignedTo.includes(team.id)) {
+                    const updatedAssigned = p.assignedTo.filter((tId) => tId !== team.id);
+                    await db_1.ProblemDb.updateOne(p.id, { assignedTo: updatedAssigned });
+                }
+            }
+            const currentAssigned = Array.isArray(matchedProblem.assignedTo) ? matchedProblem.assignedTo : [];
+            if (!currentAssigned.includes(team.id)) {
+                await db_1.ProblemDb.updateOne(matchedProblem.id, { assignedTo: [...currentAssigned, team.id] });
+            }
+        }
+        if (team.members && Array.isArray(team.members)) {
+            for (const mId of team.members) {
+                await db_1.Users.updateOne(mId, { problemSno: updateData.problemSno });
+            }
+        }
+        if (team.leaderId) {
+            await db_1.Users.updateOne(team.leaderId, { problemSno: updateData.problemSno });
+        }
+        const updatedTeam = await db_1.Teams.findOne({ id: team.id });
+        return res.json({
+            success: true,
+            message: `Problem Statement SNO #${inputSno} saved successfully!`,
+            team: updatedTeam,
+            problem: matchedProblem || null
+        });
+    }
+    catch (err) {
+        console.error('Error updating problem SNO:', err);
+        return res.status(500).json({ message: err?.message || 'Failed to update problem statement SNO' });
+    }
+});
 // --- ADMIN ENDPOINTS (ADMIN ROLE ONLY) ---
 // 1. Get Live Admin stats (alias /admin/overview avoids ad-blocker filters on '/stats')
 router.get(['/admin/stats', '/admin/overview'], exports.authenticateToken, exports.requireAdmin, async (req, res) => {
@@ -2543,9 +2555,13 @@ router.get('/admin/participants', exports.authenticateToken, exports.requireAdmi
     const allTeams = await db_1.Teams.find();
     const teamMap = {};
     const teamMemberCountMap = {};
+    const teamSnoMap = {};
     allTeams.forEach(t => {
         teamMap[t.id] = t.name;
         teamMemberCountMap[t.id] = (t.members || []).length;
+        if (t.problemSno) {
+            teamSnoMap[t.id] = String(t.problemSno);
+        }
     });
     const enriched = list.map(u => {
         let expectedAmount = 399;
@@ -2561,6 +2577,7 @@ router.get('/admin/participants', exports.authenticateToken, exports.requireAdmi
         return {
             ...u,
             teamName: u.teamId ? (teamMap[u.teamId] || u.teamId) : null,
+            problemSno: u.teamId ? (teamSnoMap[u.teamId] || u.problemSno || null) : (u.problemSno || null),
             expectedAmount
         };
     });
@@ -2904,10 +2921,54 @@ router.get('/admin/teams', exports.authenticateToken, exports.requireAdmin, asyn
         return {
             ...t,
             leaderName: leader ? leader.name : 'Unknown',
-            memberCount: t.members.length
+            memberCount: (t.members || []).length,
+            problemSno: t.problemSno || null,
+            problemTitle: t.problemTitle || null
         };
     }));
     return res.json(enhancedTeams);
+});
+// Admin update team problem statement SNO
+router.put('/admin/teams/:id/problem-sno', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { problemSno } = req.body;
+        const team = await db_1.Teams.findOne({ id });
+        if (!team)
+            return res.status(404).json({ message: 'Team not found' });
+        const inputSno = (problemSno || '').toString().trim();
+        const problems = await db_1.ProblemDb.find({});
+        const matchedProblem = problems.find(p => String(p.sno || '').trim().toLowerCase() === inputSno.toLowerCase() || String(p.id || '').trim().toLowerCase() === inputSno.toLowerCase());
+        await db_1.Teams.updateOne(team.id, {
+            problemSno: inputSno,
+            problemTitle: matchedProblem ? matchedProblem.title : (team.problemTitle || '')
+        });
+        if (matchedProblem) {
+            for (const p of problems) {
+                if (Array.isArray(p.assignedTo) && p.assignedTo.includes(team.id)) {
+                    const updatedAssigned = p.assignedTo.filter((tId) => tId !== team.id);
+                    await db_1.ProblemDb.updateOne(p.id, { assignedTo: updatedAssigned });
+                }
+            }
+            const currentAssigned = Array.isArray(matchedProblem.assignedTo) ? matchedProblem.assignedTo : [];
+            if (!currentAssigned.includes(team.id)) {
+                await db_1.ProblemDb.updateOne(matchedProblem.id, { assignedTo: [...currentAssigned, team.id] });
+            }
+        }
+        if (team.members && Array.isArray(team.members)) {
+            for (const mId of team.members) {
+                await db_1.Users.updateOne(mId, { problemSno: inputSno });
+            }
+        }
+        if (team.leaderId) {
+            await db_1.Users.updateOne(team.leaderId, { problemSno: inputSno });
+        }
+        return res.json({ success: true, message: `Team ${team.name} Problem Statement SNO updated to #${inputSno}` });
+    }
+    catch (err) {
+        console.error('Error updating admin team problem SNO:', err);
+        return res.status(500).json({ message: err?.message || 'Failed to update problem SNO' });
+    }
 });
 // 8. Delete a Team
 router.delete('/admin/teams/:id', exports.authenticateToken, exports.requireAdmin, async (req, res) => {
